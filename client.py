@@ -76,8 +76,11 @@ class AGUIClient:
     
     async def _process_event_stream(self, response) -> None:
         """Process the Server-Sent Events stream"""
-        current_message = ""
-        message_id = None
+        # Use a dict to hold mutable state
+        stream_state = {
+            'current_message': "",
+            'message_id': None
+        }
         
         async for line in response.content:
             if not (line_str := line.decode('utf-8').strip()) or line_str.startswith(':'):
@@ -91,7 +94,7 @@ class AGUIClient:
                 if not event_data:
                     continue
                     
-                should_break = await self._handle_event(event_data, current_message, message_id)
+                should_break = await self._handle_event(event_data, stream_state)
                 if should_break:
                     break
                     
@@ -112,7 +115,7 @@ class AGUIClient:
             
         return json.loads(json_part)
     
-    async def _handle_event(self, event_data: Dict[str, Any], current_message: str, message_id: str) -> bool:
+    async def _handle_event(self, event_data: Dict[str, Any], stream_state: Dict[str, Any]) -> bool:
         """Handle a single event from the stream. Returns True if processing should stop."""
         event_type = event_data.get('type')
         
@@ -120,16 +123,19 @@ class AGUIClient:
             print("🔄 Agent started processing...")
             
         elif event_type == 'TEXT_MESSAGE_START':
-            message_id = event_data.get('messageId')
+            stream_state['message_id'] = event_data.get('messageId')
             print("💬 Assistant: ", end='', flush=True)
             
         elif event_type == 'TEXT_MESSAGE_CONTENT':
             delta = event_data.get('delta', '')
-            current_message += delta
+            stream_state['current_message'] += delta
             print(delta, end='', flush=True)
             
         elif event_type == 'TEXT_MESSAGE_END':
-            self._finalize_assistant_message(current_message, message_id)
+            self._finalize_assistant_message(stream_state['current_message'], stream_state['message_id'])
+            # Reset for next message
+            stream_state['current_message'] = ""
+            stream_state['message_id'] = None
             
         elif event_type == 'TOOL_CALL_START':
             self._handle_tool_call_start(event_data)
@@ -155,6 +161,11 @@ class AGUIClient:
     def _finalize_assistant_message(self, current_message: str, message_id: str) -> None:
         """Add completed assistant message to history"""
         print()  # New line after message
+        
+        # Generate a fallback ID if message_id is None (defensive programming)
+        if message_id is None:
+            message_id = str(uuid4())
+            print("⚠️ Warning: Message ID was None, generated fallback ID")
         
         assistant_message = {
             "id": message_id,
@@ -348,26 +359,25 @@ async def show_help():
 """
     print(help_text)
 
-async def main():
-    """Main CLI interface"""
-    
+async def _initialize_client() -> AGUIClient:
+    """Initialize client and check server health"""
     print("🤖 AG-UI Multi-Agent Client")
     print("=" * 70)
     
-    # Initialize client
     client = AGUIClient()
     
-    # Check server health
     print("🔍 Checking server health...")
     if not await client.health_check():
         print("❌ Server is not available. Please start the server first:")
         print("   python server.py")
-        return
+        return None
     
-    # Show available agents
+    return client
+
+async def _show_startup_info(client: AGUIClient) -> None:
+    """Display startup information and available agents"""
     print("\n🔍 Fetching available agents...")
-    agents = await client.get_available_agents()
-    if agents:
+    if agents := await client.get_available_agents():
         print("🤖 Available agents:")
         for agent_name, agent_info in agents.items():
             features = ", ".join(agent_info.get('features', []))
@@ -376,55 +386,75 @@ async def main():
     print(f"\n💬 Chat with AG-UI agents! Current agent: {client.current_agent}")
     print("Type '/help' for commands or '/quit' to exit")
     print("-" * 70)
+
+async def _handle_user_command(client: AGUIClient, user_input: str) -> bool:
+    """Handle a user command. Returns True if should exit."""
+    command = user_input.lower()
     
+    if command in ['/quit', '/exit', '/q']:
+        print("👋 Goodbye!")
+        return True
+    
+    if command in ['/help', '/h']:
+        await show_help()
+        return False
+    
+    if user_input.startswith('/agent '):
+        agent_type = user_input[7:].strip()
+        await client.switch_agent(agent_type)
+        return False
+    
+    if command == '/agents':
+        return await _handle_agents_command(client)
+    
+    if command == '/current':
+        return await _handle_current_command(client)
+    
+    if command == '/state':
+        await client.show_state()
+        return False
+    
+    # Not a command, send as message
+    if user_input:
+        await client.send_message(user_input)
+    
+    return False
+
+async def _handle_agents_command(client: AGUIClient) -> bool:
+    """Handle the /agents command"""
+    if agents := await client.get_available_agents():
+        print("🤖 Available agents:")
+        for agent_name, agent_info in agents.items():
+            current = " (current)" if agent_name == client.current_agent else ""
+            print(f"  • {agent_name}{current}: {agent_info.get('description', 'No description')}")
+    return False
+
+async def _handle_current_command(client: AGUIClient) -> bool:
+    """Handle the /current command"""
+    agents = await client.get_available_agents()
+    if agents and client.current_agent in agents:
+        agent_info = agents[client.current_agent]
+        print(f"🤖 Current agent: {client.current_agent}")
+        print(f"📋 Description: {agent_info.get('description', 'No description')}")
+        print(f"🔧 Features: {', '.join(agent_info.get('features', []))}")
+    return False
+
+async def _run_main_loop(client: AGUIClient) -> None:
+    """Run the main interaction loop"""
     while True:
         try:
-            # Get user input
             user_input = input(f"\n👤 You [{client.current_agent}]: ").strip()
-            
-            # Handle commands
-            if user_input.lower() in ['/quit', '/exit', '/q']:
-                print("👋 Goodbye!")
+            if await _handle_user_command(client, user_input):
                 break
-            elif user_input.lower() in ['/help', '/h']:
-                await show_help()
-                continue
-            elif user_input.startswith('/agent '):
-                agent_type = user_input[7:].strip()
-                await client.switch_agent(agent_type)
-                continue
-            elif user_input.lower() == '/agents':
-                agents = await client.get_available_agents()
-                if agents:
-                    print("🤖 Available agents:")
-                    for agent_name, agent_info in agents.items():
-                        current = " (current)" if agent_name == client.current_agent else ""
-                        print(f"  • {agent_name}{current}: {agent_info.get('description', 'No description')}")
-                continue
-            elif user_input.lower() == '/current':
-                agents = await client.get_available_agents()
-                if agents and client.current_agent in agents:
-                    agent_info = agents[client.current_agent]
-                    print(f"🤖 Current agent: {client.current_agent}")
-                    print(f"📋 Description: {agent_info.get('description', 'No description')}")
-                    print(f"🔧 Features: {', '.join(agent_info.get('features', []))}")
-                continue
-            elif user_input.lower() == '/state':
-                await client.show_state()
-                continue
-                
-            if not user_input:
-                continue
-                
-            # Send message to agent
-            await client.send_message(user_input)
-            
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, EOFError):
             print("\n👋 Goodbye!")
             break
-        except EOFError:
-            print("\n👋 Goodbye!")
-            break
+
+async def main():
+    """Main CLI interface"""
+    if client := await _initialize_client():
+        await _show_startup_info(client)
+        await _run_main_loop(client)
 
 if __name__ == "__main__":
     # Check for required packages
