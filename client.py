@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 AG-UI CLI Client
-A simple command-line interface to interact with the AG-UI echo server.
+A comprehensive command-line interface to interact with AG-UI servers supporting
+text messages, tool calls, and state management.
 """
 
 import asyncio
@@ -17,6 +18,7 @@ class AGUIClient:
         self.thread_id = str(uuid4())
         self.messages: List[Dict[str, Any]] = []
         self.state: Dict[str, Any] = {}
+        self.current_agent = "echo"
         
     async def send_message(self, content: str) -> None:
         """Send a message to the agent and stream the response"""
@@ -36,10 +38,11 @@ class AGUIClient:
             "tools": [],
             "state": self.state,
             "context": [],
-            "forwardedProps": {}
+            "forwardedProps": {},
+            "agent_type": self.current_agent
         }
         
-        print(f"\n🤖 Sending message: {content}")
+        print(f"\n🤖 Sending message to {self.current_agent} agent: {content}")
         print("📡 Waiting for response...\n")
         
         try:
@@ -105,6 +108,36 @@ class AGUIClient:
                                     self.messages.append(assistant_message)
                                     current_message = ""
                                     
+                                elif event_type == 'TOOL_CALL_START':
+                                    tool_name = event_data.get('toolCallName', 'unknown')
+                                    tool_call_id = event_data.get('toolCallId')
+                                    print(f"🔧 Starting tool call: {tool_name} (ID: {tool_call_id})")
+                                    
+                                elif event_type == 'TOOL_CALL_ARGS':
+                                    tool_call_id = event_data.get('toolCallId')
+                                    args = event_data.get('delta', '{}')
+                                    try:
+                                        parsed_args = json.loads(args)
+                                        print(f"📋 Tool arguments: {parsed_args}")
+                                    except json.JSONDecodeError:
+                                        print(f"📋 Tool arguments: {args}")
+                                    
+                                elif event_type == 'TOOL_CALL_END':
+                                    tool_call_id = event_data.get('toolCallId')
+                                    print(f"✅ Tool call completed (ID: {tool_call_id})")
+                                    
+                                elif event_type == 'STATE_DELTA':
+                                    delta = event_data.get('delta', {})
+                                    print(f"📊 State updated: {delta}")
+                                    # Apply delta to local state
+                                    self.state.update(delta)
+                                    
+                                elif event_type == 'STATE_SNAPSHOT':
+                                    new_state = event_data.get('snapshot', {})
+                                    print(f"📸 State snapshot: {new_state}")
+                                    # Replace entire state
+                                    self.state = new_state
+                                    
                                 elif event_type == 'RUN_FINISHED':
                                     print("✅ Agent finished processing\n")
                                     break
@@ -120,6 +153,52 @@ class AGUIClient:
             print(f"❌ Connection error: {e}")
         except Exception as e:
             print(f"❌ Unexpected error: {e}")
+    
+    async def switch_agent(self, agent_type: str) -> bool:
+        """Switch to a different agent"""
+        available_agents = await self.get_available_agents()
+        if available_agents and agent_type in available_agents:
+            self.current_agent = agent_type
+            print(f"🔄 Switched to {agent_type} agent")
+            
+            # Show agent capabilities
+            agent_info = available_agents[agent_type]
+            print(f"📋 Description: {agent_info.get('description', 'No description')}")
+            print(f"🔧 Features: {', '.join(agent_info.get('features', []))}")
+            
+            if 'tools' in agent_info:
+                print(f"🛠️ Available tools: {', '.join(agent_info['tools'])}")
+            if 'state_operations' in agent_info:
+                print(f"💾 State operations: {', '.join(agent_info['state_operations'])}")
+            
+            return True
+        else:
+            print(f"❌ Agent '{agent_type}' not available")
+            if available_agents:
+                print(f"Available agents: {', '.join(available_agents.keys())}")
+            return False
+    
+    async def get_available_agents(self) -> Dict[str, Any]:
+        """Get list of available agents from server"""
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{self.server_url}/agents") as response:
+                    if response.status == 200:
+                        return await response.json()
+                    else:
+                        return {}
+        except Exception as e:
+            print(f"⚠️ Could not fetch agents: {e}")
+            return {}
+    
+    async def show_state(self):
+        """Display current state"""
+        if self.state:
+            print("📊 Current State:")
+            for key, value in self.state.items():
+                print(f"  • {key}: {value}")
+        else:
+            print("📊 No state data available")
     
     async def health_check(self) -> bool:
         """Check if the server is healthy"""
@@ -137,11 +216,43 @@ class AGUIClient:
             print(f"❌ Health check error: {e}")
             return False
 
+async def show_help():
+    """Display help information"""
+    help_text = """
+🤖 AG-UI Client Commands:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📝 Basic Commands:
+  • Type any message to chat with the current agent
+  • /help or /h          - Show this help
+  • /quit, /exit, or /q  - Exit the client
+  
+🔄 Agent Management:
+  • /agent <type>        - Switch to different agent (echo, tool, state)
+  • /agents              - List available agents
+  • /current             - Show current agent info
+  
+📊 State Management (when using state agent):
+  • /state               - Show current state
+  • "my name is [name]"  - Set your name
+  • "I prefer [option]"  - Set preferences
+  • "what do you know about me?" - Show stored info
+  • "reset state"        - Clear all state
+  
+🛠️ Tool Usage (when using tool agent):
+  • "calculate 5 + 3"    - Use calculator tool
+  • "what's the weather?" - Use weather tool
+  • "what time is it?"   - Use time tool
+  
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+"""
+    print(help_text)
+
 async def main():
     """Main CLI interface"""
     
-    print("🤖 AG-UI Echo Client")
-    print("=" * 50)
+    print("🤖 AG-UI Multi-Agent Client")
+    print("=" * 70)
     
     # Initialize client
     client = AGUIClient()
@@ -153,17 +264,54 @@ async def main():
         print("   python server.py")
         return
     
-    print("\n💬 Chat with the echo agent! (Type 'quit' to exit)")
-    print("-" * 50)
+    # Show available agents
+    print("\n🔍 Fetching available agents...")
+    agents = await client.get_available_agents()
+    if agents:
+        print("🤖 Available agents:")
+        for agent_name, agent_info in agents.items():
+            features = ", ".join(agent_info.get('features', []))
+            print(f"  • {agent_name}: {agent_info.get('description', 'No description')} [{features}]")
+    
+    print(f"\n💬 Chat with AG-UI agents! Current agent: {client.current_agent}")
+    print("Type '/help' for commands or '/quit' to exit")
+    print("-" * 70)
     
     while True:
         try:
             # Get user input
-            user_input = input("\n👤 You: ").strip()
+            user_input = input(f"\n👤 You [{client.current_agent}]: ").strip()
             
-            if user_input.lower() in ['quit', 'exit', 'q']:
+            # Handle commands
+            if user_input.lower() in ['/quit', '/exit', '/q']:
                 print("👋 Goodbye!")
                 break
+            elif user_input.lower() in ['/help', '/h']:
+                await show_help()
+                continue
+            elif user_input.startswith('/agent '):
+                agent_type = user_input[7:].strip()
+                await client.switch_agent(agent_type)
+                continue
+            elif user_input.lower() == '/agents':
+                agents = await client.get_available_agents()
+                if agents:
+                    print("🤖 Available agents:")
+                    for agent_name, agent_info in agents.items():
+                        current = " (current)" if agent_name == client.current_agent else ""
+                        print(f"  • {agent_name}{current}: {agent_info.get('description', 'No description')}")
+                continue
+            elif user_input.lower() == '/current':
+                agents = await client.get_available_agents()
+                if agents and client.current_agent in agents:
+                    agent_info = agents[client.current_agent]
+                    print(f"🤖 Current agent: {client.current_agent}")
+                    print(f"📋 Description: {agent_info.get('description', 'No description')}")
+                    print(f"🔧 Features: {', '.join(agent_info.get('features', []))}")
+                continue
+            elif user_input.lower() == '/state':
+                await client.show_state()
+                continue
                 
             if not user_input:
                 continue
