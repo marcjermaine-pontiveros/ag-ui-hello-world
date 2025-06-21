@@ -192,18 +192,117 @@ class AGUIClient:
         print(f"✅ Tool call completed (ID: {tool_call_id})")
     
     def _handle_state_delta(self, event_data: Dict[str, Any]) -> None:
-        """Handle state delta update event"""
-        delta = event_data.get('delta', {})
-        print(f"📊 State updated: {delta}")
+        """Handle state delta update event using JSON Patch format (RFC 6902)"""
+        delta = event_data.get('delta', [])
+        print(f"📊 State delta received: {delta}")
         
-        # Validate/filter delta before applying
-        if validated_delta := {
-            k: v for k, v in delta.items()
-            if self.is_valid_state_key(k, v)
-        }:
-            self.state.update(validated_delta)
+        # Apply JSON Patch operations
+        for operation in delta:
+            if not isinstance(operation, dict):
+                continue
+                
+            op = operation.get('op')
+            path = operation.get('path', '')
+            value = operation.get('value')
+            
+            # Convert JSON Pointer path to key list
+            path_parts = self._parse_json_pointer(path)
+            
+            try:
+                if op == 'replace' or op == 'add':
+                    self._apply_json_patch_operation(op, path_parts, value)
+                elif op == 'remove':
+                    self._remove_json_patch_path(path_parts)
+                else:
+                    print(f"⚠️ Unsupported JSON Patch operation: {op}")
+            except Exception as e:
+                print(f"⚠️ Failed to apply JSON Patch operation {op} at {path}: {e}")
+        
+        print(f"📋 Current state: {self.state}")
+    
+    def _parse_json_pointer(self, path: str) -> List[str]:
+        """Parse JSON Pointer path (RFC 6901) into component parts"""
+        if not path or path == '/':
+            return []
+        
+        # Remove leading slash and split
+        parts = path[1:].split('/') if path.startswith('/') else path.split('/')
+        
+        # Decode JSON Pointer special characters
+        decoded_parts = []
+        for part in parts:
+            # Replace ~1 with / and ~0 with ~
+            decoded_part = part.replace('~1', '/').replace('~0', '~')
+            decoded_parts.append(decoded_part)
+        
+        return decoded_parts
+    
+    def _apply_json_patch_operation(self, op: str, path_parts: List[str], value: Any) -> None:
+        """Apply a JSON Patch add or replace operation"""
+        if not path_parts:
+            # Replace entire state
+            if isinstance(value, dict):
+                self.state = value
+            return
+        
+        # Navigate to parent object
+        current = self.state
+        for part in path_parts[:-1]:
+            if part not in current:
+                current[part] = {}
+            current = current[part]
+        
+        # Apply the operation
+        final_key = path_parts[-1]
+        
+        # Handle array operations
+        if final_key == '-':
+            # Append to array
+            if isinstance(current, list):
+                current.append(value)
+            else:
+                print(f"⚠️ Cannot append to non-array at path {'/'.join(path_parts[:-1])}")
+        elif final_key.isdigit() and isinstance(current, list):
+            # Array index operation
+            index = int(final_key)
+            if op == 'add':
+                current.insert(index, value)
+            elif op == 'replace':
+                if 0 <= index < len(current):
+                    current[index] = value
+                else:
+                    print(f"⚠️ Array index {index} out of bounds")
         else:
-            print("⚠️ No valid state updates found in delta")
+            # Object property operation
+            if isinstance(current, dict):
+                current[final_key] = value
+            else:
+                print(f"⚠️ Cannot set property on non-object at path {'/'.join(path_parts[:-1])}")
+    
+    def _remove_json_patch_path(self, path_parts: List[str]) -> None:
+        """Remove a path from the state using JSON Patch remove operation"""
+        if not path_parts:
+            self.state = {}
+            return
+        
+        # Navigate to parent object
+        current = self.state
+        for part in path_parts[:-1]:
+            if part not in current:
+                return  # Path doesn't exist
+            current = current[part]
+        
+        # Remove the final key
+        final_key = path_parts[-1]
+        
+        if final_key.isdigit() and isinstance(current, list):
+            # Array index removal
+            index = int(final_key)
+            if 0 <= index < len(current):
+                current.pop(index)
+        elif isinstance(current, dict) and final_key in current:
+            # Object property removal
+            del current[final_key]
     
     def _handle_state_snapshot(self, event_data: Dict[str, Any]) -> None:
         """Handle state snapshot event"""

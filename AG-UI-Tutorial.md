@@ -109,14 +109,46 @@ pip install -r requirements.txt
 
 State management allows agents to maintain persistent information across conversations. AG-UI provides two types of state events: `STATE_DELTA` for incremental updates and `STATE_SNAPSHOT` for complete state replacement.
 
+**Important**: AG-UI state deltas use **JSON Patch format (RFC 6902)** for standardized, interoperable state updates.
+
 #### State Event Sequence
 
 ```
 1. STATE_SNAPSHOT → Complete state refresh (initial or reset)
-2. STATE_DELTA    → Incremental state updates
+2. STATE_DELTA    → Incremental state updates (JSON Patch format)
 ```
 
-#### Complete State Agent Implementation
+#### JSON Patch Format Overview
+
+AG-UI uses JSON Patch (RFC 6902) for state deltas, providing standardized operations:
+
+```python
+# Basic JSON Patch operations
+{
+    "op": "add",        # Add a new value
+    "path": "/user_name", # JSON Pointer to target location
+    "value": "Alice"    # Value to add
+}
+
+{
+    "op": "replace",    # Replace existing value
+    "path": "/conversation_count",
+    "value": 5
+}
+
+{
+    "op": "remove",     # Remove a value
+    "path": "/temporary_data"
+}
+
+{
+    "op": "add",        # Append to array
+    "path": "/topics/-", # "-" means append
+    "value": "new_topic"
+}
+```
+
+#### Complete Enhanced State Agent Implementation
 
 ```python
 class StateAgent(BaseAgent):
@@ -126,865 +158,521 @@ class StateAgent(BaseAgent):
         self.memory = {}
     
     async def run(self, input: RunAgentInput) -> AsyncGenerator[str, None]:
-        """Agent that demonstrates state management capabilities"""
+        """Agent demonstrating proper AG-UI state management with JSON Patch"""
         
         thread_id = input.thread_id
         run_id = input.run_id
         
         # Emit RUN_STARTED event
-        yield self.encoder.encode(RunStartedEvent(
+        yield self._format_sse(RunStartedEvent(
             type=EventType.RUN_STARTED,
             thread_id=thread_id,
             run_id=run_id
         ))
         
         # Initialize thread-specific memory
+        self._ensure_thread_memory(thread_id)
+        
+        # Send initial state snapshot (required by AG-UI protocol)
+        if not self.memory[thread_id].get("initialized"):
+            yield self._format_sse(StateSnapshotEvent(
+                type=EventType.STATE_SNAPSHOT,
+                snapshot=self.memory[thread_id]
+            ))
+            self.memory[thread_id]["initialized"] = True
+        
+        # Process user message with proper state updates
+        if user_messages := [msg for msg in input.messages if getattr(msg, 'role', None) == 'user']:
+            async for event in self._process_user_message(thread_id, user_messages[-1]):
+                yield event
+        
+        # Emit RUN_FINISHED event
+        yield self._format_sse(RunFinishedEvent(
+            type=EventType.RUN_FINISHED,
+            thread_id=thread_id,
+            run_id=run_id
+        ))
+    
+    def _ensure_thread_memory(self, thread_id: str) -> None:
+        """Initialize thread memory if needed"""
         if thread_id not in self.memory:
             self.memory[thread_id] = {
                 "user_name": None,
                 "preferences": {},
                 "conversation_count": 0,
-                "topics": []
+                "topics": [],
+                "initialized": False
             }
-            
-            # Send initial state snapshot
-            yield self.encoder.encode(StateSnapshotEvent(
-                type=EventType.STATE_SNAPSHOT,
-                snapshot=self.memory[thread_id]
-            ))
-        
-        # Process user message
-        user_messages = [msg for msg in input.messages if getattr(msg, 'role', None) == 'user']
-        if user_messages:
-            latest_message = user_messages[-1]
-            content = getattr(latest_message, 'content', '').lower()
-            
-            # Update conversation count
-            self.memory[thread_id]["conversation_count"] += 1
-            yield self.encoder.encode(StateDeltaEvent(
-                type=EventType.STATE_DELTA,
-                delta=[{"path": ["conversation_count"], "value": self.memory[thread_id]["conversation_count"]}]
-            ))
-            
-            # Handle different state operations
-            if content.startswith('my name is'):
-                await self._handle_name_setting(thread_id, content)
-                
-            elif 'prefer' in content:
-                await self._handle_preference_setting(thread_id, content)
-                
-            elif 'remember' in content and 'name' in content:
-                await self._handle_name_query(thread_id)
-                
-            elif 'what do you know about me' in content or 'my info' in content:
-                await self._handle_info_query(thread_id)
-                
-            elif 'reset' in content and ('state' in content or 'memory' in content):
-                await self._handle_state_reset(thread_id)
-                
-            else:
-                await self._handle_general_conversation(thread_id, content)
-        
-        # Emit RUN_FINISHED event
-        yield self.encoder.encode(RunFinishedEvent(
-            type=EventType.RUN_FINISHED,
-            thread_id=thread_id,
-            run_id=run_id
-        ))
     
-    async def _handle_name_setting(self, thread_id: str, content: str):
-        """Handle name setting with state updates"""
-        name = content.replace('my name is', '').strip().title()
-        old_name = self.memory[thread_id]["user_name"]
-        self.memory[thread_id]["user_name"] = name
+    async def _process_user_message(self, thread_id: str, message) -> AsyncGenerator[str, None]:
+        """Process user message with JSON Patch state updates"""
+        content = getattr(message, 'content', '').lower()
         
-        # Emit state delta
-        yield self.encoder.encode(StateDeltaEvent(
+        # Update conversation count using JSON Patch format
+        self.memory[thread_id]["conversation_count"] += 1
+        
+        # Emit state delta in proper JSON Patch format (RFC 6902)
+        yield self._format_sse(StateDeltaEvent(
             type=EventType.STATE_DELTA,
-            delta=[{"path": ["user_name"], "value": name}]
+            delta=[{"op": "replace", "path": "/conversation_count", "value": self.memory[thread_id]["conversation_count"]}]
         ))
         
-        # Send response
-        if old_name:
-            response = f"I've updated your name from {old_name} to {name}!"
-        else:
-            response = f"Nice to meet you, {name}! I'll remember your name for our future conversations."
-        
-        async for event in self._send_text_message(response):
-            yield event
+        # Route to appropriate handler
+        if content.startswith('my name is'):
+            async for event in self._handle_name_setting(thread_id, content):
+                yield event
+        elif 'prefer' in content:
+            async for event in self._handle_preference_setting(thread_id, content):
+                yield event
+        # ... other handlers
     
-    async def _handle_preference_setting(self, thread_id: str, content: str):
-        """Handle preference setting with state updates"""
+    async def _handle_name_setting(self, thread_id: str, content: str) -> AsyncGenerator[str, None]:
+        """Handle name setting with proper JSON Patch format"""
+        if name := content.replace('my name is', '').strip().title():
+            old_name = self.memory[thread_id]["user_name"]
+            self.memory[thread_id]["user_name"] = name
+            
+            # Emit state delta using JSON Patch format
+            op = "replace" if old_name else "add"
+            yield self._format_sse(StateDeltaEvent(
+                type=EventType.STATE_DELTA,
+                delta=[{"op": op, "path": "/user_name", "value": name}]
+            ))
+            
+            # Send response...
+    
+    async def _handle_preference_setting(self, thread_id: str, content: str) -> AsyncGenerator[str, None]:
+        """Handle preferences with nested JSON Patch operations"""
         if 'dark mode' in content:
             self.memory[thread_id]["preferences"]["theme"] = "dark"
-            pref_key, pref_value = "theme", "dark"
-            response = "I've noted that you prefer dark mode!"
-        elif 'light mode' in content:
-            self.memory[thread_id]["preferences"]["theme"] = "light"
-            pref_key, pref_value = "theme", "light"
-            response = "I've noted that you prefer light mode!"
-        else:
-            response = "I've updated your preferences!"
-            pref_key, pref_value = "general", content
-            self.memory[thread_id]["preferences"]["general"] = content
+            pref_path = "/preferences/theme"
+            pref_value = "dark"
+        # ... handle other preferences
         
-        # Emit state delta for preference change
-        yield self.encoder.encode(StateDeltaEvent(
+        # Emit state delta using JSON Patch format for nested objects
+        yield self._format_sse(StateDeltaEvent(
             type=EventType.STATE_DELTA,
-            delta=[{"path": ["preferences", pref_key], "value": pref_value}]
+            delta=[{"op": "add", "path": pref_path, "value": pref_value}]
         ))
         
-        async for event in self._send_text_message(response):
-            yield event
-    
-    async def _handle_name_query(self, thread_id: str):
-        """Handle queries about remembered name"""
-        user_name = self.memory[thread_id].get("user_name")
-        if user_name:
-            response = f"Yes, I remember! Your name is {user_name}. 😊"
-        else:
-            response = "I don't know your name yet. You can tell me by saying 'my name is [your name]'."
-        
-        async for event in self._send_text_message(response):
-            yield event
-    
-    async def _handle_info_query(self, thread_id: str):
-        """Handle requests for stored information"""
-        memory = self.memory[thread_id]
-        user_name = memory.get("user_name", "Unknown")
-        conv_count = memory.get("conversation_count", 0)
-        preferences = memory.get("preferences", {})
-        topics = memory.get("topics", [])
-        
-        info = f"📊 Here's what I know about you:\n"
-        info += f"• Name: {user_name}\n"
-        info += f"• Conversations: {conv_count}\n"
-        info += f"• Preferences: {preferences if preferences else 'None set'}\n"
-        info += f"• Topics discussed: {len(topics)}"
-        
-        async for event in self._send_text_message(info):
-            yield event
-    
-    async def _handle_state_reset(self, thread_id: str):
-        """Handle state reset requests"""
-        # Reset memory
-        self.memory[thread_id] = {
-            "user_name": None,
-            "preferences": {},
-            "conversation_count": 0,
-            "topics": []
-        }
-        
-        # Send complete state snapshot after reset
-        yield self.encoder.encode(StateSnapshotEvent(
-            type=EventType.STATE_SNAPSHOT,
-            snapshot=self.memory[thread_id]
-        ))
-        
-        response = "🔄 Memory has been reset! I've forgotten everything about our previous conversations."
-        async for event in self._send_text_message(response):
-            yield event
-    
-    async def _handle_general_conversation(self, thread_id: str, content: str):
-        """Handle general conversation with topic tracking"""
-        # Add topic to discussed topics
-        topic = content[:30] + "..." if len(content) > 30 else content
-        if topic not in self.memory[thread_id]["topics"]:
-            self.memory[thread_id]["topics"].append(topic)
-            
-            # Emit state delta for new topic
-            yield self.encoder.encode(StateDeltaEvent(
-                type=EventType.STATE_DELTA,
-                delta=[{"path": ["topics"], "value": self.memory[thread_id]["topics"]}]
-            ))
-        
-        user_name = self.memory[thread_id].get("user_name")
-        greeting = f"Hello {user_name}! " if user_name else "Hello! "
-        
-        response = greeting + f"I can remember information about you across our conversation. "
-        response += f"Try saying 'my name is [name]', 'I prefer dark mode', or 'what do you know about me?'"
-        
-        async for event in self._send_text_message(response):
-            yield event
+        # Send response...
 ```
 
-#### State Management Best Practices
+#### Advanced State Management Patterns
 
-1. **Thread Isolation**: Keep state separate per thread_id
-2. **Delta vs Snapshot**: Use deltas for small changes, snapshots for resets
-3. **Structured Paths**: Use clear, hierarchical state structures
-4. **Validation**: Validate state changes before applying
-5. **Persistence**: In production, use proper databases for state storage
-
-#### State Event Patterns
-
+##### Pattern 1: Nested Object Updates
 ```python
-# Pattern 1: Simple state delta (single field update)
-yield self.encoder.encode(StateDeltaEvent(
+# Update nested preference
+yield self._format_sse(StateDeltaEvent(
     type=EventType.STATE_DELTA,
-    delta=[{"path": ["user_name"], "value": "Alice"}]
+    delta=[{"op": "add", "path": "/preferences/ui/theme", "value": "dark"}]
+))
+```
+
+##### Pattern 2: Array Operations
+```python
+# Append to array
+yield self._format_sse(StateDeltaEvent(
+    type=EventType.STATE_DELTA,
+    delta=[{"op": "add", "path": "/topics/-", "value": "new_topic"}]
 ))
 
-# Pattern 2: Multiple field updates
-yield self.encoder.encode(StateDeltaEvent(
+# Insert at specific position
+yield self._format_sse(StateDeltaEvent(
+    type=EventType.STATE_DELTA,
+    delta=[{"op": "add", "path": "/topics/0", "value": "first_topic"}]
+))
+
+# Remove array item
+yield self._format_sse(StateDeltaEvent(
+    type=EventType.STATE_DELTA,
+    delta=[{"op": "remove", "path": "/topics/2"}]
+))
+```
+
+##### Pattern 3: Complex State Operations
+```python
+# Multiple simultaneous updates
+yield self._format_sse(StateDeltaEvent(
     type=EventType.STATE_DELTA,
     delta=[
-        {"path": ["user_name"], "value": "Alice"},
-        {"path": ["last_seen"], "value": "2024-01-15"},
-        {"path": ["preferences", "theme"], "value": "dark"}
+        {"op": "replace", "path": "/user_name", "value": "Alice"},
+        {"op": "add", "path": "/preferences/language", "value": "en"},
+        {"op": "replace", "path": "/last_seen", "value": "2024-01-15T10:30:00Z"},
+        {"op": "add", "path": "/capabilities/-", "value": "advanced_user"}
     ]
-))
-
-# Pattern 3: Complete state replacement
-yield self.encoder.encode(StateSnapshotEvent(
-    type=EventType.STATE_SNAPSHOT,
-    snapshot={
-        "user_name": "Alice",
-        "preferences": {"theme": "dark"},
-        "conversation_count": 5,
-        "topics": ["weather", "movies", "travel"]
-    }
-))
-
-# Pattern 4: Array operations
-# Add item to array
-current_topics = state.get("topics", [])
-current_topics.append("new_topic")
-yield self.encoder.encode(StateDeltaEvent(
-    type=EventType.STATE_DELTA,
-    delta=[{"path": ["topics"], "value": current_topics}]
-))
-
-# Pattern 5: Nested object updates
-yield self.encoder.encode(StateDeltaEvent(
-    type=EventType.STATE_DELTA,
-    delta=[{"path": ["user_profile", "settings", "notifications"], "value": True}]
 ))
 ```
 
-#### Client-Side State Handling
+##### Pattern 4: State Reset with Snapshot
+```python
+# Complete state replacement
+yield self._format_sse(StateSnapshotEvent(
+    type=EventType.STATE_SNAPSHOT,
+    snapshot={
+        "user_name": None,
+        "preferences": {},
+        "conversation_count": 0,
+        "topics": [],
+        "initialized": True
+    }
+))
+```
+
+#### Client-Side JSON Patch Processing
+
+The client must properly handle JSON Patch operations:
 
 ```python
 class AGUIClient:
-    def __init__(self):
-        self.state = {}
-    
-    async def _process_state_events(self, event_data):
-        """Handle state events from server"""
-        event_type = event_data.get('type')
+    def _handle_state_delta(self, event_data: Dict[str, Any]) -> None:
+        """Handle state delta using JSON Patch format (RFC 6902)"""
+        delta = event_data.get('delta', [])
         
-        if event_type == 'STATE_DELTA':
-            # Apply incremental changes
-            delta = event_data.get('delta', [])
-            for change in delta:
-                path = change.get('path', [])
-                value = change.get('value')
-                self._apply_state_change(path, value)
-            print(f"📊 State updated: {delta}")
+        # Apply JSON Patch operations
+        for operation in delta:
+            op = operation.get('op')
+            path = operation.get('path', '')
+            value = operation.get('value')
             
-        elif event_type == 'STATE_SNAPSHOT':
-            # Replace entire state
-            new_state = event_data.get('snapshot', {})
-            self.state = new_state
-            print(f"📸 State snapshot: {new_state}")
+            # Convert JSON Pointer path to key list
+            path_parts = self._parse_json_pointer(path)
+            
+            if op == 'replace' or op == 'add':
+                self._apply_json_patch_operation(op, path_parts, value)
+            elif op == 'remove':
+                self._remove_json_patch_path(path_parts)
     
-    def _apply_state_change(self, path: list, value):
-        """Apply a state change at the specified path"""
+    def _parse_json_pointer(self, path: str) -> List[str]:
+        """Parse JSON Pointer path (RFC 6901) into component parts"""
+        if not path or path == '/':
+            return []
+        
+        # Remove leading slash and split
+        parts = path[1:].split('/') if path.startswith('/') else path.split('/')
+        
+        # Decode JSON Pointer special characters (~1 -> /, ~0 -> ~)
+        return [part.replace('~1', '/').replace('~0', '~') for part in parts]
+    
+    def _apply_json_patch_operation(self, op: str, path_parts: List[str], value: Any) -> None:
+        """Apply JSON Patch add or replace operation"""
+        if not path_parts:
+            if isinstance(value, dict):
+                self.state = value
+            return
+        
+        # Navigate to parent and apply operation
         current = self.state
+        for part in path_parts[:-1]:
+            if part not in current:
+                current[part] = {}
+            current = current[part]
         
-        # Navigate to the parent object
-        for key in path[:-1]:
-            if key not in current:
-                current[key] = {}
-            current = current[key]
+        final_key = path_parts[-1]
         
-        # Set the final value
-        if path:
-            current[path[-1]] = value
+        # Handle array append (-)
+        if final_key == '-' and isinstance(current, list):
+            current.append(value)
+        # Handle array index
+        elif final_key.isdigit() and isinstance(current, list):
+            index = int(final_key)
+            if op == 'add':
+                current.insert(index, value)
+            elif op == 'replace' and 0 <= index < len(current):
+                current[index] = value
+        # Handle object property
+        elif isinstance(current, dict):
+            current[final_key] = value
 ```
 
-### 2. Base Agent Architecture
+### 6. Human-in-the-Loop (HITL) Agent
 
-Here's the actual base agent implementation from our working system:
+The HITL Agent demonstrates how to implement proper human-in-the-loop workflows as emphasized in the AG-UI documentation. This pattern enables collaborative decision-making between humans and AI agents.
+
+#### Core HITL Principles
+
+1. **Real-time Visibility**: Users can observe the agent's thought process
+2. **Contextual Awareness**: Agent accesses user actions and preferences  
+3. **Collaborative Decision-making**: Both human and AI contribute to state
+4. **Feedback Loops**: Humans can correct or guide agent behavior
+
+#### Complete HITL Agent Implementation
 
 ```python
-import asyncio
-import json
-from typing import AsyncGenerator, Dict, Any
-from uuid import uuid4
-from fastapi import FastAPI
-from sse_starlette.sse import EventSourceResponse
-
-# AG-UI imports (from working implementation)
-from ag_ui.core import (
-    RunAgentInput, EventType,
-    TextMessageStartEvent, TextMessageContentEvent, TextMessageEndEvent,
-    RunStartedEvent, RunFinishedEvent, StateDeltaEvent, StateSnapshotEvent,
-    ToolCallStartEvent, ToolCallArgsEvent, ToolCallEndEvent,
-    Message, UserMessage, AssistantMessage
-)
-from ag_ui.encoder import EventEncoder
-
-class BaseAgent:
-    """Base class for all AG-UI agents - from working implementation"""
+class HitlAgent(BaseAgent):
     def __init__(self):
-        self.encoder = EventEncoder()
+        super().__init__()
+        # Store pending actions for user approval
+        self.pending_actions = {}
+        # Store user context and state
+        self.memory = {}
     
     async def run(self, input: RunAgentInput) -> AsyncGenerator[str, None]:
-        """Override this method in concrete agent implementations"""
-        raise NotImplementedError
-    
-    async def _send_text_message(self, content: str):
-        """Helper method to send a streaming text message with realistic delays"""
-        message_id = str(uuid4())
-        
-        # Start message
-        yield self.encoder.encode(TextMessageStartEvent(
-            type=EventType.TEXT_MESSAGE_START,
-            message_id=message_id,
-            role="assistant"
-        ))
-        
-        # Stream content character by character with slight delays
-        for char in content:
-            yield self.encoder.encode(TextMessageContentEvent(
-                type=EventType.TEXT_MESSAGE_CONTENT,
-                message_id=message_id,
-                delta=char
-            ))
-            await asyncio.sleep(0.05)  # Realistic streaming delay
-        
-        # End message
-        yield self.encoder.encode(TextMessageEndEvent(
-            type=EventType.TEXT_MESSAGE_END,
-            message_id=message_id
-        ))
-```
-
-### 3. Echo Agent (Basic Text Messages)
-
-This is the actual working echo agent implementation:
-
-```python
-class EchoAgent(BaseAgent):
-    async def run(self, input: RunAgentInput) -> AsyncGenerator[str, None]:
-        """Echo agent that repeats user messages - production implementation"""
-        
-        thread_id = input.thread_id
-        run_id = input.run_id
-        
-        # Emit RUN_STARTED event
-        yield self.encoder.encode(RunStartedEvent(
-            type=EventType.RUN_STARTED,
-            thread_id=thread_id,
-            run_id=run_id
-        ))
-        
-        # Find the latest user message using walrus operator for cleaner code
-        if user_messages := [msg for msg in input.messages if getattr(msg, 'role', None) == 'user']:
-            latest_message = user_messages[-1]
-            content = getattr(latest_message, 'content', '')
-            
-            # Generate echo response
-            echo_response = f"Echo: {content}"
-            
-            # Create message ID
-            message_id = str(uuid4())
-            
-            # Emit TEXT_MESSAGE_START
-            yield self.encoder.encode(TextMessageStartEvent(
-                type=EventType.TEXT_MESSAGE_START,
-                message_id=message_id,
-                role="assistant"
-            ))
-            
-            # Emit TEXT_MESSAGE_CONTENT (character by character for streaming effect)
-            for char in echo_response:
-                yield self.encoder.encode(TextMessageContentEvent(
-                    type=EventType.TEXT_MESSAGE_CONTENT,
-                    message_id=message_id,
-                    delta=char
-                ))
-                await asyncio.sleep(0.05)  # Small delay for realistic streaming
-            
-            # Emit TEXT_MESSAGE_END
-            yield self.encoder.encode(TextMessageEndEvent(
-                type=EventType.TEXT_MESSAGE_END,
-                message_id=message_id
-            ))
-        
-        # Emit RUN_FINISHED event
-        yield self.encoder.encode(RunFinishedEvent(
-            type=EventType.RUN_FINISHED,
-            thread_id=thread_id,
-            run_id=run_id
-        ))
-```
-
-**Key Implementation Details:**
-- Uses walrus operator (`:=`) for cleaner message filtering
-- Explicit message ID generation for proper event correlation
-- Realistic streaming delays (0.05s per character)
-- Proper thread_id and run_id handling
-- Defensive programming with `getattr()` for safe attribute access
-
-### 4. Tool Agent (Demonstrates Tool Calling)
-
-Tool calling is one of the most powerful features of AG-UI, allowing agents to request the client to execute functions on their behalf. This enables human-in-the-loop workflows and external integrations.
-
-#### Tool Call Event Sequence
-
-```
-1. TOOL_CALL_START  → Announces tool call with name and ID
-2. TOOL_CALL_ARGS   → Streams tool arguments (JSON)
-3. TOOL_CALL_END    → Indicates tool call completion
-```
-
-#### Complete Tool Agent Implementation
-
-```python
-class ToolAgent(BaseAgent):
-    async def run(self, input: RunAgentInput) -> AsyncGenerator[str, None]:
-        """Agent that demonstrates tool calling capabilities"""
-        
-        thread_id = input.thread_id
-        run_id = input.run_id
-        
-        # Start the run
-        yield self.encoder.encode(RunStartedEvent(
-            type=EventType.RUN_STARTED,
-            thread_id=thread_id,
-            run_id=run_id
-        ))
-        
-        # Process user message
-        user_messages = [msg for msg in input.messages if getattr(msg, 'role', None) == 'user']
-        if user_messages:
-            latest_message = user_messages[-1]
-            content = getattr(latest_message, 'content', '').lower()
-            
-            # Determine which tool to use based on content
-            if any(word in content for word in ['calculate', 'math', '+', '-', '*', '/', '=']):
-                async for event in self._handle_calculator_tool(content):
-                    yield event
-            elif any(word in content for word in ['weather', 'temperature', 'forecast']):
-                async for event in self._handle_weather_tool(content):
-                    yield event
-            elif any(word in content for word in ['time', 'clock', 'date']):
-                async for event in self._handle_time_tool():
-                    yield event
-            else:
-                # Default response with available tools
-                response = "I can help with calculations, weather, or time. Try asking me to 'calculate 5+3' or 'what time is it?'"
-                async for event in self._send_text_message(response):
-                    yield event
-        
-        # Finish the run
-        yield self.encoder.encode(RunFinishedEvent(
-            type=EventType.RUN_FINISHED,
-            thread_id=thread_id,
-            run_id=run_id
-        ))
-    
-    async def _handle_calculator_tool(self, content: str):
-        """Handle calculator tool calls"""
-        tool_call_id = str(uuid4())
-        
-        # Extract mathematical expression
-        expression = content
-        for word in ['calculate', 'compute', 'what is', 'what\'s']:
-            expression = expression.replace(word, '').strip()
-        
-        # Start tool call
-        yield self.encoder.encode(ToolCallStartEvent(
-            type=EventType.TOOL_CALL_START,
-            tool_call_name="calculator",
-            tool_call_id=tool_call_id
-        ))
-        
-        # Send tool arguments
-        args = {"expression": expression}
-        yield self.encoder.encode(ToolCallArgsEvent(
-            type=EventType.TOOL_CALL_ARGS,
-            tool_call_id=tool_call_id,
-            delta=json.dumps(args)
-        ))
-        
-        # End tool call
-        yield self.encoder.encode(ToolCallEndEvent(
-            type=EventType.TOOL_CALL_END,
-            tool_call_id=tool_call_id
-        ))
-        
-        # Simulate calculation result
-        try:
-            # WARNING: In production, use a safe math evaluator
-            result = eval(expression.replace('x', '*'))
-            response = f"Calculation result: {expression} = {result}"
-        except:
-            response = f"Sorry, I couldn't calculate '{expression}'. Please check the expression."
-        
-        # Send response
-        async for event in self._send_text_message(response):
-            yield event
-    
-    async def _handle_weather_tool(self, content: str):
-        """Handle weather tool calls"""
-        tool_call_id = str(uuid4())
-        
-        # Start tool call
-        yield self.encoder.encode(ToolCallStartEvent(
-            type=EventType.TOOL_CALL_START,
-            tool_call_name="weather",
-            tool_call_id=tool_call_id
-        ))
-        
-        # Send tool arguments
-        args = {"location": "current_location", "units": "metric"}
-        yield self.encoder.encode(ToolCallArgsEvent(
-            type=EventType.TOOL_CALL_ARGS,
-            tool_call_id=tool_call_id,
-            delta=json.dumps(args)
-        ))
-        
-        # End tool call
-        yield self.encoder.encode(ToolCallEndEvent(
-            type=EventType.TOOL_CALL_END,
-            tool_call_id=tool_call_id
-        ))
-        
-        # Simulate weather response
-        response = "🌤️ Current weather: 22°C, partly cloudy with light winds"
-        async for event in self._send_text_message(response):
-            yield event
-    
-    async def _handle_time_tool(self):
-        """Handle time tool calls"""
-        tool_call_id = str(uuid4())
-        
-        # Start tool call
-        yield self.encoder.encode(ToolCallStartEvent(
-            type=EventType.TOOL_CALL_START,
-            tool_call_name="get_time",
-            tool_call_id=tool_call_id
-        ))
-        
-        # Send tool arguments
-        args = {"timezone": "local"}
-        yield self.encoder.encode(ToolCallArgsEvent(
-            type=EventType.TOOL_CALL_ARGS,
-            tool_call_id=tool_call_id,
-            delta=json.dumps(args)
-        ))
-        
-        # End tool call
-        yield self.encoder.encode(ToolCallEndEvent(
-            type=EventType.TOOL_CALL_END,
-            tool_call_id=tool_call_id
-        ))
-        
-        # Get current time
-        from datetime import datetime
-        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        response = f"🕐 Current time: {current_time}"
-        
-        async for event in self._send_text_message(response):
-            yield event
-```
-
-#### Tool Call Best Practices
-
-1. **Unique Tool Call IDs**: Always generate unique UUIDs for each tool call
-2. **Descriptive Tool Names**: Use clear, consistent naming conventions
-3. **Structured Arguments**: Pass well-formed JSON objects
-4. **Error Handling**: Gracefully handle tool execution failures
-5. **Security**: Validate and sanitize all tool inputs
-
-#### Common Tool Patterns
-
-```python
-# Pattern 1: Simple tool with static arguments
-async def _call_simple_tool(self, tool_name: str, args: dict):
-    tool_call_id = str(uuid4())
-    
-    yield self.encoder.encode(ToolCallStartEvent(
-        type=EventType.TOOL_CALL_START,
-        tool_call_name=tool_name,
-        tool_call_id=tool_call_id
-    ))
-    
-    yield self.encoder.encode(ToolCallArgsEvent(
-        type=EventType.TOOL_CALL_ARGS,
-        tool_call_id=tool_call_id,
-        delta=json.dumps(args)
-    ))
-    
-    yield self.encoder.encode(ToolCallEndEvent(
-        type=EventType.TOOL_CALL_END,
-        tool_call_id=tool_call_id
-    ))
-
-# Pattern 2: Tool with streaming arguments
-async def _call_streaming_tool(self, tool_name: str, large_args: dict):
-    tool_call_id = str(uuid4())
-    
-    yield self.encoder.encode(ToolCallStartEvent(
-        type=EventType.TOOL_CALL_START,
-        tool_call_name=tool_name,
-        tool_call_id=tool_call_id
-    ))
-    
-    # Stream arguments in chunks
-    args_json = json.dumps(large_args)
-    chunk_size = 100
-    for i in range(0, len(args_json), chunk_size):
-        chunk = args_json[i:i+chunk_size]
-        yield self.encoder.encode(ToolCallArgsEvent(
-            type=EventType.TOOL_CALL_ARGS,
-            tool_call_id=tool_call_id,
-            delta=chunk
-        ))
-        await asyncio.sleep(0.01)
-    
-    yield self.encoder.encode(ToolCallEndEvent(
-        type=EventType.TOOL_CALL_END,
-        tool_call_id=tool_call_id
-    ))
-```
-            content = getattr(latest_message, 'content', '').lower()
-            
-            # Route to appropriate tool
-            if 'calculate' in content or 'math' in content:
-                async for event in self._handle_calculator_tool(content):
-                    yield event
-            elif 'weather' in content:
-                async for event in self._handle_weather_tool(content):
-                    yield event
-            elif 'time' in content:
-                async for event in self._handle_time_tool():
-                    yield event
-            else:
-                async for event in self._send_text_message(
-                    "I can help with calculations, weather, or time. Try 'calculate 5 + 3'!"
-                ):
-                    yield event
-        
-        # Finish the run
-        yield self.encoder.encode(RunFinishedEvent(
-            type=EventType.RUN_FINISHED,
-            thread_id=input.thread_id,
-            run_id=input.run_id
-        ))
-    
-    async def _handle_calculator_tool(self, content: str):
-        """Demonstrate calculator tool call"""
-        tool_call_id = str(uuid4())
-        
-        # Start tool call
-        yield self.encoder.encode(ToolCallStartEvent(
-            type=EventType.TOOL_CALL_START,
-            tool_call_id=tool_call_id,
-            tool_name="calculator"
-        ))
-        
-        # Stream tool arguments
-        expression = content.replace('calculate', '').strip()
-        args = {"expression": expression}
-        yield self.encoder.encode(ToolCallArgsEvent(
-            type=EventType.TOOL_CALL_ARGS,
-            tool_call_id=tool_call_id,
-            args=json.dumps(args)
-        ))
-        
-        # End tool call
-        yield self.encoder.encode(ToolCallEndEvent(
-            type=EventType.TOOL_CALL_END,
-            tool_call_id=tool_call_id
-        ))
-        
-        # Execute tool and send result
-        try:
-            # Simple math evaluation (use safe evaluation in production!)
-            result = eval(expression.replace('x', '*').replace('÷', '/'))
-            async for event in self._send_text_message(f"Result: {expression} = {result}"):
-                yield event
-        except:
-            async for event in self._send_text_message("Sorry, couldn't calculate that."):
-                yield event
-```
-
-### 5. State Agent (Demonstrates State Management)
-
-```python
-class StateAgent(BaseAgent):
-    async def run(self, input: RunAgentInput) -> AsyncGenerator[str, None]:
-        """Agent that demonstrates state management"""
-        
-        # Start the run
-        yield self.encoder.encode(RunStartedEvent(
+        """Agent implementing Human-in-the-Loop workflows"""
+        yield self._format_sse(RunStartedEvent(
             type=EventType.RUN_STARTED,
             thread_id=input.thread_id,
             run_id=input.run_id
         ))
         
-        # Initialize or get current state
-        current_state = input.state or {}
-        if not current_state:
-            current_state = {
-                "user_preferences": {},
-                "conversation_count": 0,
-                "topics_discussed": [],
-                "user_name": None
+        self._ensure_thread_memory(input.thread_id)
+        
+        # Send state snapshot showing current HITL context
+        yield self._format_sse(StateSnapshotEvent(
+            type=EventType.STATE_SNAPSHOT,
+            snapshot={
+                "pending_actions": self.pending_actions.get(input.thread_id, []),
+                "user_preferences": self.memory[input.thread_id].get("preferences", {}),
+                "interaction_mode": "human_in_the_loop",
+                "trust_level": self.memory[input.thread_id].get("trust_level", "new_user")
             }
-            
-            # Send initial state snapshot
-            yield self.encoder.encode(StateSnapshotEvent(
-                type=EventType.STATE_SNAPSHOT,
-                state=current_state
-            ))
+        ))
         
-        # Process user message
-        user_messages = [msg for msg in input.messages if getattr(msg, 'role', None) == 'user']
-        if user_messages:
-            latest_message = user_messages[-1]
-            content = getattr(latest_message, 'content', '').lower()
-            
-            # Update conversation count
-            current_state["conversation_count"] += 1
-            
-            # Handle state operations
-            if content.startswith('my name is'):
-                name = content.replace('my name is', '').strip()
-                current_state["user_name"] = name
-                
-                # Send state delta
-                yield self.encoder.encode(StateDeltaEvent(
-                    type=EventType.STATE_DELTA,
-                    delta={"user_name": name}
-                ))
-                
-                async for event in self._send_text_message(f"Nice to meet you, {name}!"):
-                    yield event
-                    
-            elif 'prefer' in content:
-                # Handle preferences
-                if 'dark mode' in content:
-                    current_state["user_preferences"]["theme"] = "dark"
-                elif 'light mode' in content:
-                    current_state["user_preferences"]["theme"] = "light"
-                
-                # Send state delta
-                yield self.encoder.encode(StateDeltaEvent(
-                    type=EventType.STATE_DELTA,
-                    delta={"user_preferences": current_state["user_preferences"]}
-                ))
-                
-                async for event in self._send_text_message("Preferences updated!"):
-                    yield event
-                    
-            elif 'what do you know about me' in content:
-                # Show current state
-                user_name = current_state.get("user_name", "Unknown")
-                conv_count = current_state.get("conversation_count", 0)
-                preferences = current_state.get("user_preferences", {})
-                
-                info = f"Name: {user_name}, Conversations: {conv_count}, Preferences: {preferences}"
-                async for event in self._send_text_message(info):
-                    yield event
-                    
-            else:
-                # Regular conversation
-                user_name = current_state.get("user_name")
-                greeting = f"Hello {user_name}! " if user_name else "Hello! "
-                response = greeting + "I can remember your name and preferences."
-                
-                async for event in self._send_text_message(response):
-                    yield event
-            
-            # Always update conversation count
-            yield self.encoder.encode(StateDeltaEvent(
-                type=EventType.STATE_DELTA,
-                delta={"conversation_count": current_state["conversation_count"]}
-            ))
+        if user_messages := [msg for msg in input.messages if getattr(msg, 'role', None) == 'user']:
+            async for event in self._process_hitl_message(input.thread_id, user_messages[-1]):
+                yield event
         
-        # Finish the run
-        yield self.encoder.encode(RunFinishedEvent(
+        yield self._format_sse(RunFinishedEvent(
             type=EventType.RUN_FINISHED,
             thread_id=input.thread_id,
             run_id=input.run_id
         ))
+    
+    def _ensure_thread_memory(self, thread_id: str) -> None:
+        """Initialize HITL-specific thread memory"""
+        if thread_id not in self.memory:
+            self.memory[thread_id] = {
+                "preferences": {},
+                "interaction_history": [],
+                "trust_level": "new_user"  # new_user, trusted, verified
+            }
+        if thread_id not in self.pending_actions:
+            self.pending_actions[thread_id] = []
 ```
 
-### 6. FastAPI Server Setup
+#### HITL Workflow Patterns
+
+##### Pattern 1: Action Proposal with Approval
+```python
+async def _propose_email_action(self, thread_id: str, content: str) -> AsyncGenerator[str, None]:
+    """Propose an action and request user approval"""
+    # Create proposed action
+    proposed_action = {
+        "id": str(uuid4()),
+        "type": "send_email",
+        "details": {
+            "recipient": "team@company.com",
+            "subject": "Meeting Update",
+            "content": content.replace('send email', '').strip()
+        },
+        "risk_level": "medium",
+        "requires_approval": True
+    }
+    
+    # Add to pending actions
+    self.pending_actions[thread_id].append(proposed_action)
+    
+    # Update state with pending action
+    yield self._format_sse(StateDeltaEvent(
+        type=EventType.STATE_DELTA,
+        delta=[{"op": "add", "path": "/pending_actions/-", "value": proposed_action}]
+    ))
+    
+    # Ask for user approval
+    approval_message = (
+        f"🤔 **Action Requires Approval**\n\n"
+        f"I want to send an email:\n"
+        f"• To: {proposed_action['details']['recipient']}\n"
+        f"• Subject: {proposed_action['details']['subject']}\n"
+        f"• Content: {proposed_action['details']['content']}\n\n"
+        f"Do you approve? (yes/no)"
+    )
+    
+    async for event in self._send_text_message(approval_message):
+        yield event
+```
+
+##### Pattern 2: Risk-Based Approval
+```python
+async def _propose_deletion_action(self, thread_id: str, content: str) -> AsyncGenerator[str, None]:
+    """High-risk actions require explicit confirmation"""
+    proposed_action = {
+        "id": str(uuid4()),
+        "type": "delete_data",
+        "details": {"target": content.replace('delete', '').strip()},
+        "risk_level": "high",
+        "requires_approval": True
+    }
+    
+    # High-risk actions get special treatment
+    approval_message = (
+        f"⚠️ **HIGH RISK ACTION**\n\n"
+        f"You want to delete: {proposed_action['details']['target']}\n"
+        f"This action is PERMANENT and cannot be undone.\n\n"
+        f"Are you absolutely sure? (yes/no)"
+    )
+    
+    # Add to state and request approval...
+```
+
+##### Pattern 3: Trust-Based Automation
+```python
+async def _propose_calculation_action(self, thread_id: str, content: str) -> AsyncGenerator[str, None]:
+    """Low-risk actions can be auto-approved for trusted users"""
+    expression = content.replace('calculate', '').strip()
+    trust_level = self.memory[thread_id].get("trust_level", "new_user")
+    
+    if trust_level == "new_user":
+        # Request approval for new users
+        proposed_action = {
+            "type": "calculation",
+            "details": {"expression": expression},
+            "risk_level": "low",
+            "requires_approval": True
+        }
+        
+        # Add to pending actions and request approval...
+    else:
+        # Auto-approve for trusted users
+        async for event in self._execute_calculation(thread_id, expression):
+            yield event
+```
+
+##### Pattern 4: Approval Processing
+```python
+async def _handle_approval(self, thread_id: str) -> AsyncGenerator[str, None]:
+    """Process user approval of pending actions"""
+    if not self.pending_actions[thread_id]:
+        async for event in self._send_text_message("No pending actions to approve."):
+            yield event
+        return
+    
+    # Get and remove approved action
+    action = self.pending_actions[thread_id].pop(0)
+    
+    # Update state to remove pending action
+    yield self._format_sse(StateDeltaEvent(
+        type=EventType.STATE_DELTA,
+        delta=[{"op": "remove", "path": "/pending_actions/0"}]
+    ))
+    
+    # Execute the approved action
+    if action["type"] == "send_email":
+        async for event in self._execute_email_action(thread_id, action):
+            yield event
+    elif action["type"] == "delete_data":
+        async for event in self._execute_deletion_action(thread_id, action):
+            yield event
+    # ... handle other action types
+```
+
+#### HITL State Integration
+
+HITL workflows generate rich state information:
 
 ```python
-app = FastAPI(title="AG-UI Multi-Agent Server")
+# Track interaction history
+self.memory[thread_id]["interaction_history"].append({
+    "action": "email_sent",
+    "timestamp": datetime.now().isoformat(),
+    "user_approved": True,
+    "details": action["details"]
+})
 
-# Agent instances
-agents = {
-    "echo": EchoAgent(),
-    "tool": ToolAgent(),
-    "state": StateAgent()
-}
-
-class RunAgentRequest(BaseModel):
-    thread_id: str
-    messages: list
-    tools: list = []
-    state: Dict[str, Any] = {}
-    context: list = []
-    forwardedProps: dict = {}
-    agent_type: str = "echo"  # Agent selection
-
-@app.post("/agent")
-async def run_agent(request: RunAgentRequest):
-    """Run the specified agent"""
+# Update trust level based on interactions
+successful_actions = len([h for h in self.memory[thread_id]["interaction_history"] 
+                         if h.get("user_approved")])
+if successful_actions > 10:
+    self.memory[thread_id]["trust_level"] = "trusted"
     
-    # Select agent
-    agent = agents.get(request.agent_type, agents["echo"])
-    
-    # Create run input
-    run_input = RunAgentInput(
-        thread_id=request.thread_id,
-        run_id=str(uuid4()),
-        messages=request.messages,
-        tools=request.tools,
-        state=request.state,
-        context=request.context,
-        forwardedProps=request.forwardedProps
-    )
-    
-    # Return streaming response
-    return EventSourceResponse(
-        agent.run(run_input),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Headers": "*",
-        }
-    )
-
-@app.get("/agents")
-async def list_agents():
-    """List available agents"""
-    return {
-        "echo": {
-            "description": "Simple echo agent",
-            "features": ["text_messages"]
-        },
-        "tool": {
-            "description": "Tool-calling agent",
-            "features": ["text_messages", "tool_calls"],
-            "tools": ["calculator", "weather", "get_time"]
-        },
-        "state": {
-            "description": "State management agent",
-            "features": ["text_messages", "state_management"]
-        }
-    }
+    # Emit state update
+    yield self._format_sse(StateDeltaEvent(
+        type=EventType.STATE_DELTA,
+        delta=[{"op": "replace", "path": "/user_preferences/trust_level", "value": "trusted"}]
+    ))
 ```
+
+#### Advanced HITL Patterns
+
+##### Contextual Decision Making
+```python
+# Agent uses state to make informed proposals
+user_preferences = self.memory[thread_id].get("preferences", {})
+if user_preferences.get("email_notifications") == "minimal":
+    # Propose batch email instead of individual emails
+    # ...
+
+# Agent learns from user feedback
+rejection_count = len([h for h in self.memory[thread_id]["interaction_history"] 
+                      if not h.get("user_approved")])
+if rejection_count > 5:
+    # Increase approval threshold for this user
+    self.memory[thread_id]["trust_level"] = "cautious"
+```
+
+##### Collaborative State Building
+```python
+# Human and agent collaboratively build state
+async def _handle_preference_learning(self, thread_id: str, feedback: str):
+    """Learn from user feedback to improve future proposals"""
+    if "too many emails" in feedback:
+        self.memory[thread_id]["preferences"]["email_frequency"] = "low"
+    elif "need more details" in feedback:
+        self.memory[thread_id]["preferences"]["detail_level"] = "high"
+    
+    # Update state with learned preferences
+    yield self._format_sse(StateDeltaEvent(
+        type=EventType.STATE_DELTA,
+        delta=[{"op": "replace", "path": "/preferences", "value": self.memory[thread_id]["preferences"]}]
+    ))
+```
+
+### State Management Best Practices
+
+1. **Use JSON Patch**: Always use RFC 6902 JSON Patch format for state deltas
+2. **Thread Isolation**: Keep state separate per thread_id  
+3. **Delta vs Snapshot**: Use deltas for incremental changes, snapshots for resets
+4. **Structured Paths**: Use clear JSON Pointer paths (/user/preferences/theme)
+5. **Validation**: Validate state changes before applying
+6. **HITL Integration**: Use state to enable collaborative decision-making
+7. **Persistence**: In production, use proper databases for state storage
+8. **Security**: Validate and sanitize all state data
+
+### Advanced State Management Considerations
+
+#### Production State Storage
+```python
+# Example with database integration
+class PersistentStateAgent(BaseAgent):
+    def __init__(self, db_connection):
+        super().__init__()
+        self.db = db_connection
+    
+    async def _save_state(self, thread_id: str, state: dict):
+        """Save state to persistent storage"""
+        await self.db.upsert_state(thread_id, state)
+    
+    async def _load_state(self, thread_id: str) -> dict:
+        """Load state from persistent storage"""
+        return await self.db.get_state(thread_id) or {}
+```
+
+#### State Synchronization Conflict Resolution
+```python
+async def _handle_state_conflict(self, local_state: dict, server_state: dict) -> dict:
+    """Resolve conflicts between local and server state"""
+    # Implement merge strategy (last-write-wins, user-preference, etc.)
+    resolved_state = {}
+    
+    # Example: User preferences take precedence
+    resolved_state.update(server_state)
+    if "user_preferences" in local_state:
+        resolved_state["user_preferences"] = local_state["user_preferences"]
+    
+    return resolved_state
+```
+
+This comprehensive state management system provides the foundation for sophisticated AI applications that combine the best of human intuition and AI capabilities through the AG-UI protocol.
 
 ---
 
@@ -1400,136 +1088,6 @@ class HybridAgent(BaseAgent):
             yield event
 ```
 
-#### Integration Patterns
-
-```python
-# Pattern 1: Tool result affects state
-async def _tool_with_state_update(self, thread_id: str, tool_name: str, result: Any):
-    # Update state based on tool result
-    self.memory[thread_id]["last_tool_result"] = result
-    self.memory[thread_id]["tool_history"].append({
-        "name": tool_name,
-        "result": result,
-        "timestamp": datetime.now().isoformat()
-    })
-    
-    # Emit state update
-    yield self.encoder.encode(StateDeltaEvent(
-        type=EventType.STATE_DELTA,
-        delta=[
-            {"path": ["last_tool_result"], "value": result},
-            {"path": ["tool_history"], "value": self.memory[thread_id]["tool_history"]}
-        ]
-    ))
-
-# Pattern 2: State influences tool selection
-async def _smart_tool_selection(self, thread_id: str, content: str):
-    user_preferences = self.memory[thread_id].get("preferences", {})
-    
-    # Choose tool based on user preferences
-    if "calculation" in content:
-        if user_preferences.get("calculator_mode") == "advanced":
-            await self._call_advanced_calculator(content)
-        else:
-            await self._call_basic_calculator(content)
-    elif "weather" in content:
-        preferred_units = user_preferences.get("weather_units", "metric")
-        await self._call_weather_tool(content, units=preferred_units)
-
-# Pattern 3: Cross-session state with tool context
-async def _persistent_tool_learning(self, thread_id: str):
-    # Learn from tool usage patterns
-    tool_history = self.memory[thread_id].get("tool_history", [])
-    
-    # Analyze most used tools
-    tool_usage = {}
-    for entry in tool_history:
-        tool_name = entry["name"]
-        tool_usage[tool_name] = tool_usage.get(tool_name, 0) + 1
-    
-    # Update user preferences based on usage
-    if tool_usage:
-        most_used = max(tool_usage, key=tool_usage.get)
-        self.memory[thread_id]["preferences"]["favorite_tool"] = most_used
-        
-        yield self.encoder.encode(StateDeltaEvent(
-            type=EventType.STATE_DELTA,
-            delta=[{"path": ["preferences", "favorite_tool"], "value": most_used}]
-        ))
-```
-
-#### Advanced Client Handling
-
-```python
-class AdvancedAGUIClient(AGUIClient):
-    def __init__(self):
-        super().__init__()
-        self.tool_results = {}
-        self.current_tool_call = None
-    
-    async def _process_events(self, line: str):
-        """Enhanced event processing for tool + state integration"""
-        # ... existing event processing ...
-        
-        elif event_type == 'TOOL_CALL_START':
-            tool_name = event_data.get('tool_call_name')
-            tool_call_id = event_data.get('tool_call_id')
-            self.current_tool_call = {
-                "id": tool_call_id,
-                "name": tool_name,
-                "args": "",
-                "start_time": datetime.now()
-            }
-            print(f"🔧 Starting {tool_name} (ID: {tool_call_id})")
-            
-        elif event_type == 'TOOL_CALL_ARGS':
-            if self.current_tool_call:
-                args_delta = event_data.get('delta', '')
-                self.current_tool_call["args"] += args_delta
-                
-        elif event_type == 'TOOL_CALL_END':
-            if self.current_tool_call:
-                tool_call_id = event_data.get('tool_call_id')
-                
-                # Store tool result with state context
-                self.tool_results[tool_call_id] = {
-                    "name": self.current_tool_call["name"],
-                    "args": self.current_tool_call["args"],
-                    "duration": (datetime.now() - self.current_tool_call["start_time"]).total_seconds(),
-                    "state_at_time": self.state.copy()
-                }
-                
-                print(f"✅ Tool {self.current_tool_call['name']} completed")
-                self.current_tool_call = None
-        
-        elif event_type == 'STATE_DELTA':
-            # Enhanced state processing with tool context
-            delta = event_data.get('delta', [])
-            
-            # Check if state change is related to recent tool usage
-            if self.current_tool_call:
-                print(f"📊 State updated during {self.current_tool_call['name']}: {delta}")
-            else:
-                print(f"📊 State updated: {delta}")
-            
-            # Apply state changes
-            for change in delta:
-                path = change.get('path', [])
-                value = change.get('value')
-                self._apply_state_change(path, value)
-    
-    async def show_tool_analytics(self):
-        """Display tool usage analytics with state correlation"""
-        print("\n🔧 Tool Usage Analytics:")
-        print("-" * 40)
-        
-        for tool_id, result in self.tool_results.items():
-            print(f"Tool: {result['name']}")
-            print(f"Duration: {result['duration']:.2f}s")
-            print(f"State at time: {result['state_at_time']}")
-            print("-" * 20)
-```
-
 ---
 
 ## Advanced Features
@@ -1883,7 +1441,7 @@ if event_type == 'STATE_DELTA':
     delta = event_data.get('delta', {})
     self.state.update(delta)  # Merge changes
 elif event_type == 'STATE_SNAPSHOT':
-    new_state = event_data.get('state', {})
+    new_state = event_data.get('snapshot', {})
     self.state = new_state  # Replace entirely
 ```
 

@@ -121,16 +121,49 @@ The demo showcases:
 ✅ Agent finished processing
 ```
 
-### State Agent Example
+### State Agent Example (Enhanced with JSON Patch)
 ```
 👤 You [state]: my name is Alice
 🔄 Agent started processing...
-📊 State updated: [{"path": ["user_name"], "value": "Alice"}]
-💬 Assistant: Nice to meet you, Alice! I'll remember your name.
+📊 State delta received: [{"op": "replace", "path": "/conversation_count", "value": 1}]
+📊 State delta received: [{"op": "add", "path": "/user_name", "value": "Alice"}]
+💬 Assistant: Nice to meet you, Alice! I'll remember your name for our future conversations.
 ✅ Agent finished processing
 
 👤 You [state]: what do you know about me?
-💬 Assistant: Name: Alice, Conversations: 2, Preferences: {}
+💬 Assistant: 📊 Here's what I know about you:
+• Name: Alice
+• Conversations: 2
+• Preferences: None set
+• Topics discussed: 0
+```
+
+### Human-in-the-Loop (HITL) Agent Example
+```
+👤 You [hitl]: send email to team about meeting
+🔄 Agent started processing...
+📸 State snapshot: {"pending_actions": [], "user_preferences": {}, "interaction_mode": "human_in_the_loop"}
+📊 State delta received: [{"op": "add", "path": "/pending_actions/-", "value": {...}}]
+💬 Assistant: 🤔 **Action Requires Approval**
+
+I want to send an email with the following details:
+• Recipient: example@example.com
+• Subject: Automated Email
+• Content: to team about meeting
+
+Do you approve this action? (yes/no)
+✅ Agent finished processing
+
+👤 You [hitl]: yes
+🔄 Agent started processing...
+📊 State delta received: [{"op": "remove", "path": "/pending_actions/0"}]
+💬 Assistant: 📧 **Email Sent Successfully**
+
+• To: example@example.com
+• Subject: Automated Email
+• Status: Delivered
+• Time: Just now
+✅ Agent finished processing
 ```
 
 ## AG-UI Protocol Events
@@ -175,23 +208,75 @@ The implementation handles all standard AG-UI events:
 
 ## State Management
 
-The State Agent maintains persistent information:
+The State Agent maintains persistent information using **JSON Patch format (RFC 6902)** as specified in the AG-UI protocol:
 
 ```python
 {
     "user_name": "Alice",
-    "user_preferences": {"theme": "dark", "language": "en"},
+    "preferences": {"theme": "dark", "language": "en"},
     "conversation_count": 15,
-    "topics_discussed": ["weather", "math", "preferences"],
-    "memory_operations": ["set_name", "set_preference", "recall_info"]
+    "topics": ["weather", "math", "preferences"],
+    "initialized": true
 }
 ```
 
 ### State Operations
 - **Name Setting**: "my name is [name]"
 - **Preference Setting**: "I prefer [preference]"
-- **Information Recall**: "what do you know about me?"
-- **Memory Reset**: "reset my memory"
+- **Memory Recall**: "what do you know about me?"
+- **State Reset**: "reset my memory"
+
+### JSON Patch State Updates
+The enhanced state management now uses proper JSON Patch format:
+
+```python
+# Add operation
+{"op": "add", "path": "/user_name", "value": "Alice"}
+
+# Replace operation  
+{"op": "replace", "path": "/conversation_count", "value": 5}
+
+# Remove operation
+{"op": "remove", "path": "/preferences/theme"}
+
+# Array append
+{"op": "add", "path": "/topics/-", "value": "new_topic"}
+```
+
+## Human-in-the-Loop (HITL) Workflows
+
+The HITL Agent demonstrates proper human-in-the-loop patterns as described in the AG-UI documentation:
+
+### Key Features:
+- **Action Approval**: Requests user approval before executing actions
+- **Risk Assessment**: Different approval levels based on action risk
+- **Trust Levels**: Adjustable trust levels (new_user, trusted, verified)
+- **Pending Actions**: State tracking of actions awaiting approval
+- **Transparency**: Full visibility into proposed actions
+
+### HITL Actions:
+- **Email Sending**: `send email to team about meeting`
+- **Data Deletion**: `delete old files` (high risk)
+- **Purchases**: `buy coffee` (medium risk)
+- **Calculations**: `calculate 5+3` (low risk, auto-approved for trusted users)
+
+### Trust Level Management:
+```
+👤 You [hitl]: set trust level to trusted
+💬 Assistant: 🔐 Trust Level Updated
+Previous: new_user
+New: trusted
+This affects how much approval I'll request for actions.
+```
+
+### State Management in HITL
+The HITL agent uses sophisticated state management to track:
+- Pending actions requiring approval
+- User interaction history
+- Trust levels and preferences
+- Action execution logs
+
+This implementation follows the AG-UI protocol's emphasis on **collaborative decision-making** and **real-time visibility** into agent processes.
 
 ## Development
 
