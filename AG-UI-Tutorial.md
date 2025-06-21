@@ -1047,10 +1047,7 @@ class AGUIClient:
             line_str = line.decode('utf-8').strip()
             
             if line_str.startswith('data: '):
-                # Handle double "data: " prefix
-                json_part = line_str[6:]
-                if json_part.startswith('data: '):
-                    json_part = json_part[6:]
+                json_part = line_str[6:]  # Remove "data: " prefix
                 
                 try:
                     event_data = json.loads(json_part)
@@ -1066,7 +1063,7 @@ class AGUIClient:
                     
                     # Text message events
                     elif event_type == 'TEXT_MESSAGE_START':
-                        message_id = event_data.get('messageId')
+                        message_id = event_data.get('message_id')
                         print("💬 Assistant: ", end='', flush=True)
                         
                     elif event_type == 'TEXT_MESSAGE_CONTENT':
@@ -1086,12 +1083,12 @@ class AGUIClient:
                     
                     # Tool calling events
                     elif event_type == 'TOOL_CALL_START':
-                        tool_name = event_data.get('toolName', 'unknown')
-                        tool_call_id = event_data.get('toolCallId')
+                        tool_name = event_data.get('tool_call_name', 'unknown')
+                        tool_call_id = event_data.get('tool_call_id')
                         print(f"🔧 Tool call: {tool_name} (ID: {tool_call_id})")
                         
                     elif event_type == 'TOOL_CALL_ARGS':
-                        args = event_data.get('args', '{}')
+                        args = event_data.get('delta', '{}')
                         try:
                             parsed_args = json.loads(args)
                             print(f"📋 Arguments: {parsed_args}")
@@ -1099,6 +1096,7 @@ class AGUIClient:
                             print(f"📋 Arguments: {args}")
                             
                     elif event_type == 'TOOL_CALL_END':
+                        tool_call_id = event_data.get('tool_call_id')
                         print("✅ Tool call completed")
                     
                     # State management events
@@ -1108,7 +1106,7 @@ class AGUIClient:
                         self.state.update(delta)
                         
                     elif event_type == 'STATE_SNAPSHOT':
-                        new_state = event_data.get('state', {})
+                        new_state = event_data.get('snapshot', {})
                         print(f"📸 State snapshot: {new_state}")
                         self.state = new_state
                         
@@ -1474,8 +1472,8 @@ class AdvancedAGUIClient(AGUIClient):
         # ... existing event processing ...
         
         elif event_type == 'TOOL_CALL_START':
-            tool_name = event_data.get('toolCallName')
-            tool_call_id = event_data.get('toolCallId')
+            tool_name = event_data.get('tool_call_name')
+            tool_call_id = event_data.get('tool_call_id')
             self.current_tool_call = {
                 "id": tool_call_id,
                 "name": tool_name,
@@ -1491,7 +1489,7 @@ class AdvancedAGUIClient(AGUIClient):
                 
         elif event_type == 'TOOL_CALL_END':
             if self.current_tool_call:
-                tool_call_id = event_data.get('toolCallId')
+                tool_call_id = event_data.get('tool_call_id')
                 
                 # Store tool result with state context
                 self.tool_results[tool_call_id] = {

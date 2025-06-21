@@ -6,7 +6,6 @@ from uuid import uuid4
 
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, JSONResponse
-from sse_starlette.sse import EventSourceResponse
 from pydantic import BaseModel
 
 # AG-UI core imports
@@ -17,14 +16,23 @@ from ag_ui.core import (
     ToolCallStartEvent, ToolCallArgsEvent, ToolCallEndEvent,
     Message, UserMessage, AssistantMessage
 )
-from ag_ui.encoder import EventEncoder
 
 app = FastAPI(title="AG-UI Multi-Agent Server")
 
 # Base Agent class
 class BaseAgent:
     def __init__(self):
-        self.encoder = EventEncoder()
+        pass  # Remove EventEncoder
+    
+    def _format_sse(self, event) -> str:
+        """Format event as proper Server-Sent Event"""
+        event_dict = event.model_dump()
+        # Convert EventType enum to string
+        if 'type' in event_dict:
+            event_dict['type'] = event_dict['type'].value if hasattr(event_dict['type'], 'value') else str(event_dict['type'])
+        
+        json_data = json.dumps(event_dict)
+        return f"data: {json_data}\n\n"
 
 # 1. Simple Echo Agent (existing)
 class EchoAgent(BaseAgent):
@@ -35,7 +43,7 @@ class EchoAgent(BaseAgent):
         run_id = input.run_id
         
         # Emit RUN_STARTED event
-        yield self.encoder.encode(RunStartedEvent(
+        yield self._format_sse(RunStartedEvent(
             type=EventType.RUN_STARTED,
             thread_id=thread_id,
             run_id=run_id
@@ -53,7 +61,7 @@ class EchoAgent(BaseAgent):
             message_id = str(uuid4())
             
             # Emit TEXT_MESSAGE_START
-            yield self.encoder.encode(TextMessageStartEvent(
+            yield self._format_sse(TextMessageStartEvent(
                 type=EventType.TEXT_MESSAGE_START,
                 message_id=message_id,
                 role="assistant"
@@ -61,7 +69,7 @@ class EchoAgent(BaseAgent):
             
             # Emit TEXT_MESSAGE_CONTENT (character by character for streaming effect)
             for char in echo_response:
-                yield self.encoder.encode(TextMessageContentEvent(
+                yield self._format_sse(TextMessageContentEvent(
                     type=EventType.TEXT_MESSAGE_CONTENT,
                     message_id=message_id,
                     delta=char
@@ -69,13 +77,13 @@ class EchoAgent(BaseAgent):
                 await asyncio.sleep(0.05)  # Small delay for streaming effect
             
             # Emit TEXT_MESSAGE_END
-            yield self.encoder.encode(TextMessageEndEvent(
+            yield self._format_sse(TextMessageEndEvent(
                 type=EventType.TEXT_MESSAGE_END,
                 message_id=message_id
             ))
         
         # Emit RUN_FINISHED event
-        yield self.encoder.encode(RunFinishedEvent(
+        yield self._format_sse(RunFinishedEvent(
             type=EventType.RUN_FINISHED,
             thread_id=thread_id,
             run_id=run_id
@@ -90,7 +98,7 @@ class ToolAgent(BaseAgent):
         run_id = input.run_id
         
         # Emit RUN_STARTED event
-        yield self.encoder.encode(RunStartedEvent(
+        yield self._format_sse(RunStartedEvent(
             type=EventType.RUN_STARTED,
             thread_id=thread_id,
             run_id=run_id
@@ -117,7 +125,7 @@ class ToolAgent(BaseAgent):
                     yield event
         
         # Emit RUN_FINISHED event
-        yield self.encoder.encode(RunFinishedEvent(
+        yield self._format_sse(RunFinishedEvent(
             type=EventType.RUN_FINISHED,
             thread_id=thread_id,
             run_id=run_id
@@ -128,7 +136,7 @@ class ToolAgent(BaseAgent):
         tool_call_id = str(uuid4())
         
         # Start tool call
-        yield self.encoder.encode(ToolCallStartEvent(
+        yield self._format_sse(ToolCallStartEvent(
             type=EventType.TOOL_CALL_START,
             tool_call_id=tool_call_id,
             tool_call_name="calculator"
@@ -136,14 +144,14 @@ class ToolAgent(BaseAgent):
         
         # Stream tool arguments
         args = {"expression": content.replace('calculate', '').strip()}
-        yield self.encoder.encode(ToolCallArgsEvent(
+        yield self._format_sse(ToolCallArgsEvent(
             type=EventType.TOOL_CALL_ARGS,
             tool_call_id=tool_call_id,
             delta=json.dumps(args)
         ))
         
         # End tool call
-        yield self.encoder.encode(ToolCallEndEvent(
+        yield self._format_sse(ToolCallEndEvent(
             type=EventType.TOOL_CALL_END,
             tool_call_id=tool_call_id
         ))
@@ -163,7 +171,7 @@ class ToolAgent(BaseAgent):
         tool_call_id = str(uuid4())
         
         # Start tool call
-        yield self.encoder.encode(ToolCallStartEvent(
+        yield self._format_sse(ToolCallStartEvent(
             type=EventType.TOOL_CALL_START,
             tool_call_id=tool_call_id,
             tool_call_name="weather"
@@ -171,14 +179,14 @@ class ToolAgent(BaseAgent):
         
         # Stream tool arguments
         args = {"location": "current"}
-        yield self.encoder.encode(ToolCallArgsEvent(
+        yield self._format_sse(ToolCallArgsEvent(
             type=EventType.TOOL_CALL_ARGS,
             tool_call_id=tool_call_id,
             delta=json.dumps(args)
         ))
         
         # End tool call
-        yield self.encoder.encode(ToolCallEndEvent(
+        yield self._format_sse(ToolCallEndEvent(
             type=EventType.TOOL_CALL_END,
             tool_call_id=tool_call_id
         ))
@@ -192,7 +200,7 @@ class ToolAgent(BaseAgent):
         tool_call_id = str(uuid4())
         
         # Start tool call
-        yield self.encoder.encode(ToolCallStartEvent(
+        yield self._format_sse(ToolCallStartEvent(
             type=EventType.TOOL_CALL_START,
             tool_call_id=tool_call_id,
             tool_call_name="get_time"
@@ -200,14 +208,14 @@ class ToolAgent(BaseAgent):
         
         # Stream tool arguments
         args = {"timezone": "local"}
-        yield self.encoder.encode(ToolCallArgsEvent(
+        yield self._format_sse(ToolCallArgsEvent(
             type=EventType.TOOL_CALL_ARGS,
             tool_call_id=tool_call_id,
             delta=json.dumps(args)
         ))
         
         # End tool call
-        yield self.encoder.encode(ToolCallEndEvent(
+        yield self._format_sse(ToolCallEndEvent(
             type=EventType.TOOL_CALL_END,
             tool_call_id=tool_call_id
         ))
@@ -417,7 +425,7 @@ class ToolAgent(BaseAgent):
         message_id = str(uuid4())
         
         # Start message
-        yield self.encoder.encode(TextMessageStartEvent(
+        yield self._format_sse(TextMessageStartEvent(
             type=EventType.TEXT_MESSAGE_START,
             message_id=message_id,
             role="assistant"
@@ -425,7 +433,7 @@ class ToolAgent(BaseAgent):
         
         # Stream content
         for char in content:
-            yield self.encoder.encode(TextMessageContentEvent(
+            yield self._format_sse(TextMessageContentEvent(
                 type=EventType.TEXT_MESSAGE_CONTENT,
                 message_id=message_id,
                 delta=char
@@ -433,7 +441,7 @@ class ToolAgent(BaseAgent):
             await asyncio.sleep(0.03)
         
         # End message
-        yield self.encoder.encode(TextMessageEndEvent(
+        yield self._format_sse(TextMessageEndEvent(
             type=EventType.TEXT_MESSAGE_END,
             message_id=message_id
         ))
@@ -441,13 +449,13 @@ class ToolAgent(BaseAgent):
 # 3. State Management Agent (Simplified - Text Only)
 class StateAgent(BaseAgent):
     def __init__(self):
-        super().__init__()
+        pass  # Remove EventEncoder
         # Simple in-memory state storage (in production, use proper storage)
         self.memory = {}
     
     async def run(self, input: RunAgentInput) -> AsyncGenerator[str, None]:
         """Agent that demonstrates state management capabilities using text responses"""
-        yield self.encoder.encode(RunStartedEvent(
+        yield self._format_sse(RunStartedEvent(
             type=EventType.RUN_STARTED,
             thread_id=input.thread_id,
             run_id=input.run_id
@@ -459,7 +467,7 @@ class StateAgent(BaseAgent):
             async for event in self._process_user_message(input.thread_id, user_messages[-1]):
                 yield event
         
-        yield self.encoder.encode(RunFinishedEvent(
+        yield self._format_sse(RunFinishedEvent(
             type=EventType.RUN_FINISHED,
             thread_id=input.thread_id,
             run_id=input.run_id
@@ -601,7 +609,7 @@ class StateAgent(BaseAgent):
         message_id = str(uuid4())
         
         # Start message
-        yield self.encoder.encode(TextMessageStartEvent(
+        yield self._format_sse(TextMessageStartEvent(
             type=EventType.TEXT_MESSAGE_START,
             message_id=message_id,
             role="assistant"
@@ -609,7 +617,7 @@ class StateAgent(BaseAgent):
         
         # Stream content
         for char in content:
-            yield self.encoder.encode(TextMessageContentEvent(
+            yield self._format_sse(TextMessageContentEvent(
                 type=EventType.TEXT_MESSAGE_CONTENT,
                 message_id=message_id,
                 delta=char
@@ -617,7 +625,7 @@ class StateAgent(BaseAgent):
             await asyncio.sleep(0.03)
         
         # End message
-        yield self.encoder.encode(TextMessageEndEvent(
+        yield self._format_sse(TextMessageEndEvent(
             type=EventType.TEXT_MESSAGE_END,
             message_id=message_id
         ))
@@ -666,10 +674,11 @@ async def run_agent(request: RunAgentRequest):
     event_generator = agent.run(run_input)
     
     # Return streaming response
-    return EventSourceResponse(
+    return StreamingResponse(
         event_generator,
-        media_type="text/event-stream",
+        media_type="text/plain",  # Use plain to avoid auto SSE formatting
         headers={
+            "Content-Type": "text/event-stream",  # Set SSE content type manually
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "Access-Control-Allow-Origin": "*",
@@ -681,9 +690,9 @@ async def run_agent(request: RunAgentRequest):
 async def health_check():
     """Health check endpoint"""
     return {
-        "status": "healthy", 
+        "status": "healthy",
         "agents": list(agents.keys()),
-        "features": ["text_messages", "tool_calls", "state_management"]
+        "features": ["streaming", "tools", "state"]
     }
 
 @app.get("/agents")
@@ -705,6 +714,8 @@ async def list_agents():
             "state_operations": ["user_preferences", "conversation_tracking", "state_reset"]
         }
     }
+
+
 
 if __name__ == "__main__":
     import uvicorn

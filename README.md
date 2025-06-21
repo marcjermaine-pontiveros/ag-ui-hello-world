@@ -347,6 +347,30 @@ This implementation is fully compatible with the AG-UI protocol specification:
 
 **Your AG-UI clients will work with ANY compliant AG-UI server!**
 
+## Technical Implementation Notes
+
+### Server-Sent Events Format
+The server uses proper SSE format with single `data: ` prefixes:
+```
+data: {"type":"RUN_STARTED","thread_id":"123","run_id":"456"}
+
+data: {"type":"TEXT_MESSAGE_START","message_id":"789","role":"assistant"}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","message_id":"789","delta":"H"}
+
+```
+
+### Custom SSE Formatting
+Instead of using external libraries that might double-encode, we use custom SSE formatting:
+```python
+def _format_sse(self, event) -> str:
+    event_dict = event.model_dump()
+    if 'type' in event_dict:
+        event_dict['type'] = event_dict['type'].value
+    json_data = json.dumps(event_dict)
+    return f"data: {json_data}\n\n"
+```
+
 ## License
 
-This implementation is provided as an educational example of the AG-UI protocol with advanced multi-agent capabilities. 
+This implementation is provided as an educational example of the AG-UI protocol with advanced multi-agent capabilities.

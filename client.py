@@ -108,11 +108,6 @@ class AGUIClient:
     def _parse_sse_data(self, line_str: str) -> Dict[str, Any]:
         """Parse Server-Sent Event data"""
         json_part = line_str[6:]  # Remove "data: " prefix
-        
-        # Handle double "data: " prefix
-        if json_part.startswith('data: '):
-            json_part = json_part[6:]
-            
         return json.loads(json_part)
     
     async def _handle_event(self, event_data: Dict[str, Any], stream_state: Dict[str, Any]) -> bool:
@@ -123,7 +118,7 @@ class AGUIClient:
             print("🔄 Agent started processing...")
             
         elif event_type == 'TEXT_MESSAGE_START':
-            stream_state['message_id'] = event_data.get('messageId')
+            stream_state['message_id'] = event_data.get('message_id')
             print("💬 Assistant: ", end='', flush=True)
             
         elif event_type == 'TEXT_MESSAGE_CONTENT':
@@ -176,13 +171,13 @@ class AGUIClient:
     
     def _handle_tool_call_start(self, event_data: Dict[str, Any]) -> None:
         """Handle tool call start event"""
-        tool_name = event_data.get('toolCallName', 'unknown')
-        tool_call_id = event_data.get('toolCallId')
+        tool_name = event_data.get('tool_call_name', 'unknown')
+        tool_call_id = event_data.get('tool_call_id')
         print(f"🔧 Starting tool call: {tool_name} (ID: {tool_call_id})")
     
     def _handle_tool_call_args(self, event_data: Dict[str, Any]) -> None:
         """Handle tool call arguments event"""
-        tool_call_id = event_data.get('toolCallId')
+        tool_call_id = event_data.get('tool_call_id')
         args = event_data.get('delta', '{}')
         
         try:
@@ -193,7 +188,7 @@ class AGUIClient:
     
     def _handle_tool_call_end(self, event_data: Dict[str, Any]) -> None:
         """Handle tool call end event"""
-        tool_call_id = event_data.get('toolCallId')
+        tool_call_id = event_data.get('tool_call_id')
         print(f"✅ Tool call completed (ID: {tool_call_id})")
     
     def _handle_state_delta(self, event_data: Dict[str, Any]) -> None:
