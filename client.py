@@ -129,8 +129,15 @@ class AGUIClient:
                                 elif event_type == 'STATE_DELTA':
                                     delta = event_data.get('delta', {})
                                     print(f"📊 State updated: {delta}")
-                                    # Apply delta to local state
-                                    self.state.update(delta)
+                                    # Validate/filter delta before applying
+                                    validated_delta = {
+                                        k: v for k, v in delta.items()
+                                        if self.is_valid_state_key(k, v)
+                                    }
+                                    if validated_delta:
+                                        self.state.update(validated_delta)
+                                    else:
+                                        print("⚠️ No valid state updates found in delta")
                                     
                                 elif event_type == 'STATE_SNAPSHOT':
                                     new_state = event_data.get('snapshot', {})
@@ -215,6 +222,58 @@ class AGUIClient:
         except Exception as e:
             print(f"❌ Health check error: {e}")
             return False
+
+    def is_valid_state_key(self, key: str, value) -> bool:
+        """Validate state keys and values before applying them"""
+        # Basic validation rules for state keys and values
+        
+        # Check key is a valid string
+        if not isinstance(key, str) or not key:
+            return False
+        
+        # Prevent keys that could be used maliciously
+        dangerous_keys = ['__', 'eval', 'exec', 'import', 'open', 'file', 'system', 'subprocess']
+        if any(dangerous in key.lower() for dangerous in dangerous_keys):
+            return False
+        
+        # Limit key length to prevent abuse
+        if len(key) > 100:
+            return False
+        
+        # Check value types - only allow basic types
+        allowed_types = (str, int, float, bool, type(None), list, dict)
+        if not isinstance(value, allowed_types):
+            return False
+        
+        # For strings, limit length and check for dangerous content
+        if isinstance(value, str):
+            if len(value) > 1000:  # Reasonable limit for state values
+                return False
+            # Prevent potentially dangerous string content
+            if any(dangerous in value.lower() for dangerous in ['<script', 'javascript:', 'data:text/html']):
+                return False
+        
+        # For lists and dicts, do recursive validation
+        elif isinstance(value, list):
+            if len(value) > 100:  # Limit list size
+                return False
+            return all(self.is_valid_state_key(f"{key}[{i}]", item) for i, item in enumerate(value))
+        
+        elif isinstance(value, dict):
+            if len(value) > 50:  # Limit dict size
+                return False
+            return all(
+                self.is_valid_state_key(f"{key}.{k}", v) 
+                for k, v in value.items()
+                if isinstance(k, str)
+            )
+        
+        # For numbers, check for reasonable ranges
+        elif isinstance(value, (int, float)):
+            if abs(value) > 1e10:  # Prevent extremely large numbers
+                return False
+        
+        return True
 
 async def show_help():
     """Display help information"""

@@ -152,13 +152,12 @@ class ToolAgent(BaseAgent):
         
         # Simulate tool execution and send result
         try:
-            # Simple math evaluation (be careful in production!)
             expression = args["expression"].replace('x', '*').replace('÷', '/')
-            result = eval(expression) if expression else "Invalid expression"
+            result = self._safe_calculate(expression) if expression else "Invalid expression"
             async for event in self._send_text_message(f"Calculation result: {expression} = {result}"):
                 yield event
-        except:
-            async for event in self._send_text_message("Sorry, I couldn't calculate that expression."):
+        except Exception as e:
+            async for event in self._send_text_message(f"Sorry, I couldn't calculate that expression: {str(e)}"):
                 yield event
     
     async def _handle_weather_tool(self, content: str):
@@ -219,6 +218,126 @@ class ToolAgent(BaseAgent):
         current_time = time.strftime("%Y-%m-%d %H:%M:%S")
         async for event in self._send_text_message(f"🕐 Current time: {current_time}"):
             yield event
+    
+    def _safe_calculate(self, expression: str) -> str:
+        """Safely evaluate mathematical expressions without using eval()"""
+        import re
+        import operator
+        
+        # Define allowed operators
+        ops = {
+            '+': operator.add,
+            '-': operator.sub,
+            '*': operator.mul,
+            '/': operator.truediv,
+            '//': operator.floordiv,
+            '%': operator.mod,
+            '**': operator.pow,
+            '^': operator.pow,  # Alternative power operator
+        }
+        
+        try:
+            # Remove whitespace
+            expression = expression.replace(' ', '')
+            
+            # Check for invalid characters (only allow numbers, operators, parentheses, and decimal points)
+            if not re.match(r'^[0-9+\-*/().%^*]+$', expression):
+                return "Invalid characters in expression"
+            
+            # Simple validation to prevent obvious malicious patterns
+            if any(dangerous in expression.lower() for dangerous in ['import', 'exec', 'eval', '__', 'open', 'file']):
+                return "Invalid expression"
+            
+            # For now, use a simple recursive descent parser for basic arithmetic
+            result = self._parse_expression(expression)
+            
+            # Format result nicely
+            if isinstance(result, float):
+                if result.is_integer():
+                    return str(int(result))
+                else:
+                    return f"{result:.6f}".rstrip('0').rstrip('.')
+            return str(result)
+            
+        except ZeroDivisionError:
+            return "Division by zero error"
+        except Exception as e:
+            return f"Calculation error: {str(e)}"
+    
+    def _parse_expression(self, expression: str) -> float:
+        """Simple expression parser for basic arithmetic"""
+        # This is a simplified parser for basic arithmetic expressions
+        # In production, consider using a proper math expression library like simpleeval
+        
+        # Remove outer parentheses if they wrap the entire expression
+        while expression.startswith('(') and expression.endswith(')'):
+            # Check if parentheses are balanced
+            count = 0
+            for i, char in enumerate(expression):
+                if char == '(':
+                    count += 1
+                elif char == ')':
+                    count -= 1
+                    if count == 0 and i < len(expression) - 1:
+                        break
+            else:
+                expression = expression[1:-1]
+        
+        # Handle simple cases first
+        if expression.replace('.', '').replace('-', '').isdigit():
+            return float(expression)
+        
+        # Find the last + or - (lowest precedence)
+        paren_count = 0
+        for i in range(len(expression) - 1, -1, -1):
+            char = expression[i]
+            if char == ')':
+                paren_count += 1
+            elif char == '(':
+                paren_count -= 1
+            elif paren_count == 0 and char in '+-' and i > 0:
+                left = self._parse_expression(expression[:i])
+                right = self._parse_expression(expression[i+1:])
+                return left + right if char == '+' else left - right
+        
+        # Find the last * or / (higher precedence)
+        paren_count = 0
+        for i in range(len(expression) - 1, -1, -1):
+            char = expression[i]
+            if char == ')':
+                paren_count += 1
+            elif char == '(':
+                paren_count -= 1
+            elif paren_count == 0 and char in '*/':
+                left = self._parse_expression(expression[:i])
+                right = self._parse_expression(expression[i+1:])
+                if char == '*':
+                    return left * right
+                else:
+                    if right == 0:
+                        raise ZeroDivisionError("Division by zero")
+                    return left / right
+        
+        # Handle ** or ^ (power) - search from left to right for right associativity
+        paren_count = 0
+        for i in range(len(expression)):
+            char = expression[i]
+            if char == '(':
+                paren_count += 1
+            elif char == ')':
+                paren_count -= 1
+            elif paren_count == 0:
+                if i < len(expression) - 1 and expression[i:i+2] == '**':
+                    left = self._parse_expression(expression[:i])
+                    right = self._parse_expression(expression[i+2:])
+                    return left ** right
+                elif char == '^':
+                    left = self._parse_expression(expression[:i])
+                    right = self._parse_expression(expression[i+1:])
+                    return left ** right
+        
+        # If we get here, try to parse as a number
+        return float(expression)
     
     async def _send_text_message(self, content: str):
         """Helper method to send a text message"""
