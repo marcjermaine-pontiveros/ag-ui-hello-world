@@ -1,14 +1,50 @@
-# AG-UI Echo Server and Client
+# AG-UI Multi-Agent Server and Client
 
-A simple implementation of the Agent User Interaction Protocol (AG-UI) with a server that echoes back user messages and a CLI client for interaction.
+A comprehensive implementation of the Agent User Interaction Protocol (AG-UI) featuring multiple specialized agents, tool calling capabilities, state management, and a full-featured CLI client.
 
 ## Features
 
-- **AG-UI Protocol Compliant**: Implements the standard AG-UI protocol for agent-client communication
-- **Real-time Streaming**: Responses are streamed character-by-character for immediate feedback
-- **Simple Echo Agent**: Server agent that echoes back any message sent by the client
-- **CLI Client**: Easy-to-use command-line interface for testing
-- **Health Checks**: Built-in health monitoring for the server
+- **AG-UI Protocol Compliant**: Implements the complete AG-UI protocol specification
+- **Multi-Agent Architecture**: Three specialized agent types (Echo, Tool, State)
+- **Real-time Streaming**: Character-by-character text streaming with full event support
+- **Tool Calling**: Integrated tool calling with calculator, weather, and time tools
+- **State Management**: Persistent user data and preferences across conversations
+- **Enhanced CLI Client**: Full-featured command-line interface with agent switching
+- **Comprehensive Demo**: Interactive demonstration of all AG-UI features
+- **Health Monitoring**: Built-in health checks and server status monitoring
+
+## Architecture
+
+### Server Components
+
+#### 1. Echo Agent (`EchoAgent`)
+- Simple message echoing functionality
+- Demonstrates basic text streaming
+- Character-by-character response delivery
+- Perfect for testing basic protocol compliance
+
+#### 2. Tool Agent (`ToolAgent`)
+- Advanced tool calling capabilities
+- **Calculator Tool**: Safe mathematical expression evaluation
+- **Weather Tool**: Simulated weather information
+- **Time Tool**: Current time and date functionality
+- Proper tool call event sequences (START → ARGS → END)
+
+#### 3. State Agent (`StateAgent`)
+- Persistent state management
+- User profile storage (name, preferences)
+- Conversation tracking and analytics
+- State delta and snapshot event handling
+- Memory operations (set, get, reset)
+
+### Client Features
+
+- **Multi-Agent Support**: Switch between different agent types
+- **Complete Event Handling**: All AG-UI event types supported
+- **Interactive Commands**: Built-in command system
+- **Real-time Streaming**: Live response display
+- **State Visualization**: Current state inspection
+- **Health Monitoring**: Server connectivity checks
 
 ## Installation
 
@@ -21,118 +57,296 @@ pip install -r requirements.txt
 
 ### Starting the Server
 
-1. Start the AG-UI echo server:
+1. Start the AG-UI multi-agent server:
 ```bash
 python server.py
 ```
 
 The server will start on `http://localhost:8000` with the following endpoints:
-- `POST /agent` - Main agent endpoint for processing messages
+- `POST /agent` - Main agent endpoint (supports `agent_type` parameter)
 - `GET /health` - Health check endpoint
+- `GET /agents` - List available agents and their capabilities
 
-### Using the Client
+### Using the Interactive Client
 
-1. In a new terminal, start the CLI client:
+1. In a new terminal, start the enhanced CLI client:
 ```bash
 python client.py
 ```
 
-2. The client will automatically check server health and connect to the agent
-3. Type your messages and press Enter to send them
-4. Watch the agent echo back your messages in real-time
-5. Type `quit`, `exit`, or `q` to exit the client
+2. The client supports these commands:
+   - `/agent <type>` - Switch agent (echo, tool, state)
+   - `/agents` - List available agents
+   - `/current` - Show current agent
+   - `/state` - Display current state
+   - `/health` - Check server health
+   - `/help` - Show help
+   - `/quit` - Exit client
 
-### Example Session
+3. Type regular messages to chat with the current agent
+4. Watch real-time streaming responses with full event handling
 
+### Running the Comprehensive Demo
+
+Experience all features at once:
+```bash
+python demo.py
 ```
-🤖 AG-UI Echo Client
-==================================================
-🔍 Checking server health...
-✅ Server health: {'status': 'healthy', 'agent': 'echo'}
 
-💬 Chat with the echo agent! (Type 'quit' to exit)
---------------------------------------------------
+The demo showcases:
+- All three agent types in action
+- Tool calling with different tools
+- State management and persistence
+- Agent switching capabilities
+- Complete AG-UI event handling
 
-👤 You: Hello, world!
+## Agent Examples
 
-🤖 Sending message: Hello, world!
-📡 Waiting for response...
-
+### Echo Agent Example
+```
+👤 You [echo]: Hello, world!
 🔄 Agent started processing...
 💬 Assistant: Echo: Hello, world!
 ✅ Agent finished processing
-
-👤 You: How are you today?
-
-🤖 Sending message: How are you today?
-📡 Waiting for response...
-
-🔄 Agent started processing...
-💬 Assistant: Echo: How are you today?
-✅ Agent finished processing
-
-👤 You: quit
-👋 Goodbye!
 ```
 
-## Architecture
+### Tool Agent Example
+```
+👤 You [tool]: calculate 15 * 7 + 3
+🔄 Agent started processing...
+🔧 Starting tool call: calculator (ID: abc123)
+📋 Tool arguments: {"expression": "15 * 7 + 3"}
+✅ Tool call completed (ID: abc123)
+💬 Assistant: Calculation result: 15 * 7 + 3 = 108
+✅ Agent finished processing
+```
 
-### Server (`server.py`)
+### State Agent Example
+```
+👤 You [state]: my name is Alice
+🔄 Agent started processing...
+📊 State updated: [{"path": ["user_name"], "value": "Alice"}]
+💬 Assistant: Nice to meet you, Alice! I'll remember your name.
+✅ Agent finished processing
 
-The server implements:
-- **EchoAgent**: A simple agent that extends `AbstractAgent` and echoes back user messages
-- **FastAPI Application**: HTTP server with SSE (Server-Sent Events) support
-- **Event Streaming**: Proper AG-UI event emission (RUN_STARTED → TEXT_MESSAGE_* → RUN_FINISHED)
-- **Message History**: Maintains conversation context across interactions
-
-### Client (`client.py`)
-
-The client implements:
-- **AGUIClient**: Handles communication with the AG-UI server
-- **SSE Processing**: Parses and handles Server-Sent Events
-- **Real-time Display**: Shows streaming responses as they arrive
-- **Message History**: Maintains conversation state locally
+👤 You [state]: what do you know about me?
+💬 Assistant: Name: Alice, Conversations: 2, Preferences: {}
+```
 
 ## AG-UI Protocol Events
 
-The implementation follows the AG-UI protocol by emitting these events in sequence:
+The implementation handles all standard AG-UI events:
 
-1. **RUN_STARTED**: Indicates the agent has started processing
-2. **TEXT_MESSAGE_START**: Begins a new assistant message
-3. **TEXT_MESSAGE_CONTENT**: Streams message content character by character
-4. **TEXT_MESSAGE_END**: Completes the assistant message
-5. **RUN_FINISHED**: Indicates the agent has finished processing
+### Core Lifecycle Events
+- **`RUN_STARTED`**: Agent processing begins
+- **`RUN_FINISHED`**: Agent processing complete
+
+### Text Message Events
+- **`TEXT_MESSAGE_START`**: New assistant message begins
+- **`TEXT_MESSAGE_CONTENT`**: Streaming message content (character deltas)
+- **`TEXT_MESSAGE_END`**: Assistant message complete
+
+### Tool Calling Events
+- **`TOOL_CALL_START`**: Tool execution begins
+- **`TOOL_CALL_ARGS`**: Tool arguments (JSON streamed)
+- **`TOOL_CALL_END`**: Tool execution complete
+
+### State Management Events
+- **`STATE_DELTA`**: Incremental state updates
+- **`STATE_SNAPSHOT`**: Complete state replacement
+
+## Available Tools
+
+### Calculator Tool
+- **Function**: Safe mathematical expression evaluation
+- **Usage**: "calculate 5 + 3 * 2", "math: 100 / 4"
+- **Features**: Basic arithmetic, parentheses, power operations
+- **Safety**: Protected against code injection
+
+### Weather Tool
+- **Function**: Weather information (simulated)
+- **Usage**: "what's the weather?", "weather forecast"
+- **Response**: Current conditions with temperature and description
+
+### Time Tool
+- **Function**: Current date and time
+- **Usage**: "what time is it?", "current time"
+- **Response**: Formatted timestamp
+
+## State Management
+
+The State Agent maintains persistent information:
+
+```python
+{
+    "user_name": "Alice",
+    "user_preferences": {"theme": "dark", "language": "en"},
+    "conversation_count": 15,
+    "topics_discussed": ["weather", "math", "preferences"],
+    "memory_operations": ["set_name", "set_preference", "recall_info"]
+}
+```
+
+### State Operations
+- **Name Setting**: "my name is [name]"
+- **Preference Setting**: "I prefer [preference]"
+- **Information Recall**: "what do you know about me?"
+- **Memory Reset**: "reset my memory"
 
 ## Development
 
-### Adding New Features
+### Adding New Agents
 
-To extend this implementation:
+```python
+class CustomAgent(BaseAgent):
+    async def run(self, input: RunAgentInput) -> AsyncGenerator[str, None]:
+        # Emit RUN_STARTED
+        yield self.encoder.encode(RunStartedEvent(...))
+        
+        # Your agent logic here
+        async for event in self._send_text_message("Custom response"):
+            yield event
+            
+        # Emit RUN_FINISHED  
+        yield self.encoder.encode(RunFinishedEvent(...))
+```
 
-1. **Custom Agents**: Create new agent classes extending `AbstractAgent`
-2. **Tool Support**: Implement tool calling and execution
-3. **State Management**: Add persistent state across conversations
-4. **Multi-Agent**: Support agent-to-agent handoffs
+### Adding New Tools
 
-### Testing
+```python
+async def _handle_custom_tool(self, content: str):
+    tool_call_id = str(uuid4())
+    
+    # Start tool call
+    yield self.encoder.encode(ToolCallStartEvent(...))
+    
+    # Send arguments
+    yield self.encoder.encode(ToolCallArgsEvent(...))
+    
+    # End tool call
+    yield self.encoder.encode(ToolCallEndEvent(...))
+    
+    # Process result and respond
+    async for event in self._send_text_message(result):
+        yield event
+```
 
-The server includes a health check endpoint for monitoring:
+## API Endpoints
+
+### POST /agent
+Main agent interaction endpoint supporting:
+- `thread_id`: Conversation thread identifier
+- `messages`: Conversation history
+- `tools`: Available tools list
+- `state`: Current conversation state
+- `agent_type`: Agent selection (echo, tool, state)
+
+### GET /agents
+Returns available agents and their capabilities:
+```json
+{
+  "echo": {
+    "description": "Simple echo agent",
+    "features": ["text_messages"]
+  },
+  "tool": {
+    "description": "Tool-calling agent", 
+    "features": ["text_messages", "tool_calls"],
+    "tools": ["calculator", "weather", "get_time"]
+  },
+  "state": {
+    "description": "State management agent",
+    "features": ["text_messages", "state_management"]
+  }
+}
+```
+
+### GET /health
+Health check with agent status:
+```json
+{
+  "status": "healthy",
+  "agents": ["echo", "tool", "state"],
+  "features": ["streaming", "tools", "state"]
+}
+```
+
+## Testing
+
+### Manual Testing
 ```bash
+# Test individual agents
+python client.py
+/agent echo
+Hello, world!
+
+/agent tool  
+calculate 5 + 3
+
+/agent state
+my name is Alice
+```
+
+### Automated Demo
+```bash
+# Run comprehensive feature demo
+python demo.py
+```
+
+### Health Checks
+```bash
+# Check server status
 curl http://localhost:8000/health
+
+# List available agents
+curl http://localhost:8000/agents
 ```
 
 ## Troubleshooting
 
 ### Common Issues
 
-1. **Server not starting**: Check if port 8000 is available
-2. **Client connection errors**: Ensure the server is running before starting the client
-3. **Import errors**: Verify all dependencies are installed with `pip install -r requirements.txt`
+1. **Server not starting**: 
+   - Check if port 8000 is available
+   - Verify all dependencies are installed: `pip install -r requirements.txt`
+
+2. **Client connection errors**: 
+   - Ensure server is running before starting client
+   - Check server health: `curl http://localhost:8000/health`
+
+3. **Agent switching failures**:
+   - Verify agent type exists: `/agents` command
+   - Check server logs for errors
+
+4. **Tool execution errors**:
+   - Tool agents validate input expressions
+   - Check calculation syntax for math operations
+
+5. **State persistence issues**:
+   - State is maintained per thread_id
+   - Use `/state` command to inspect current state
 
 ### Debug Mode
 
-For debugging, you can add logging to both server and client by modifying the respective files.
+Add logging for detailed debugging:
+
+```python
+import logging
+logging.basicConfig(level=logging.DEBUG)
+```
+
+## Protocol Compatibility
+
+This implementation is fully compatible with the AG-UI protocol specification:
+- ✅ Standard event types
+- ✅ Server-Sent Events transport
+- ✅ JSON message format
+- ✅ Tool calling specification
+- ✅ State management patterns
+- ✅ Multi-agent architecture
+
+**Your AG-UI clients will work with ANY compliant AG-UI server!**
 
 ## License
 
-This implementation is provided as an educational example of the AG-UI protocol. 
+This implementation is provided as an educational example of the AG-UI protocol with advanced multi-agent capabilities. 
