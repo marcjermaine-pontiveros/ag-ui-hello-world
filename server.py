@@ -5,7 +5,7 @@ from typing import AsyncGenerator, Dict, Any
 from uuid import uuid4
 
 from fastapi import FastAPI, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from sse_starlette.sse import EventSourceResponse
 from pydantic import BaseModel
 
@@ -448,7 +448,7 @@ class StateAgent(BaseAgent):
                 info = f"📊 Here's what I know about you:\n"
                 info += f"• Name: {user_name}\n"
                 info += f"• Conversations: {conv_count}\n"
-                info += f"• Preferences: {preferences if preferences else 'None set'}\n"
+                info += f"• Preferences: {preferences or 'None set'}\n"
                 info += f"• Topics discussed: {len(topics)}"
                 
                 async for event in self._send_text_message(info):
@@ -536,7 +536,12 @@ async def run_agent(request: RunAgentRequest):
     """Run the specified agent with the provided input"""
     
     # Select agent based on request
-    agent = agents.get(request.agent_type, agents["echo"])
+    if request.agent_type not in agents:
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"Unknown agent_type '{request.agent_type}'. Valid types are: {list(agents.keys())}."}
+        )
+    agent = agents[request.agent_type]
     
     # Create run input
     run_input = RunAgentInput(

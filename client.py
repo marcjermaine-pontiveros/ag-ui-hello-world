@@ -22,17 +22,31 @@ class AGUIClient:
         
     async def send_message(self, content: str) -> None:
         """Send a message to the agent and stream the response"""
+        self._add_user_message(content)
+        payload = self._create_request_payload()
         
-        # Add user message to history
+        print(f"\n🤖 Sending message to {self.current_agent} agent: {content}")
+        print("📡 Waiting for response...\n")
+        
+        try:
+            await self._stream_agent_response(payload)
+        except aiohttp.ClientError as e:
+            print(f"❌ Connection error: {e}")
+        except Exception as e:
+            print(f"❌ Unexpected error: {e}")
+    
+    def _add_user_message(self, content: str) -> None:
+        """Add user message to conversation history"""
         user_message = {
             "id": str(uuid4()),
             "role": "user",
             "content": content
         }
         self.messages.append(user_message)
-        
-        # Prepare request payload
-        payload = {
+    
+    def _create_request_payload(self) -> Dict[str, Any]:
+        """Create the request payload for the agent"""
+        return {
             "thread_id": self.thread_id,
             "messages": self.messages,
             "tools": [],
@@ -41,125 +55,155 @@ class AGUIClient:
             "forwardedProps": {},
             "agent_type": self.current_agent
         }
+    
+    async def _stream_agent_response(self, payload: Dict[str, Any]) -> None:
+        """Handle the streaming response from the agent"""
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{self.server_url}/agent",
+                json=payload,
+                headers={
+                    "Accept": "text/event-stream",
+                    "Cache-Control": "no-cache"
+                }
+            ) as response:
+                
+                if response.status != 200:
+                    print(f"❌ Error: Server returned status {response.status}")
+                    return
+                
+                await self._process_event_stream(response)
+    
+    async def _process_event_stream(self, response) -> None:
+        """Process the Server-Sent Events stream"""
+        current_message = ""
+        message_id = None
         
-        print(f"\n🤖 Sending message to {self.current_agent} agent: {content}")
-        print("📡 Waiting for response...\n")
+        async for line in response.content:
+            if not (line_str := line.decode('utf-8').strip()) or line_str.startswith(':'):
+                continue
+                
+            if not line_str.startswith('data: '):
+                continue
+                
+            try:
+                event_data = self._parse_sse_data(line_str)
+                if not event_data:
+                    continue
+                    
+                should_break = await self._handle_event(event_data, current_message, message_id)
+                if should_break:
+                    break
+                    
+            except json.JSONDecodeError:
+                print(f"⚠️ Failed to parse event: {line_str}")
+                continue
+            except Exception as e:
+                print(f"⚠️ Error processing event: {e}")
+                continue
+    
+    def _parse_sse_data(self, line_str: str) -> Dict[str, Any]:
+        """Parse Server-Sent Event data"""
+        json_part = line_str[6:]  # Remove "data: " prefix
+        
+        # Handle double "data: " prefix
+        if json_part.startswith('data: '):
+            json_part = json_part[6:]
+            
+        return json.loads(json_part)
+    
+    async def _handle_event(self, event_data: Dict[str, Any], current_message: str, message_id: str) -> bool:
+        """Handle a single event from the stream. Returns True if processing should stop."""
+        event_type = event_data.get('type')
+        
+        if event_type == 'RUN_STARTED':
+            print("🔄 Agent started processing...")
+            
+        elif event_type == 'TEXT_MESSAGE_START':
+            message_id = event_data.get('messageId')
+            print("💬 Assistant: ", end='', flush=True)
+            
+        elif event_type == 'TEXT_MESSAGE_CONTENT':
+            delta = event_data.get('delta', '')
+            current_message += delta
+            print(delta, end='', flush=True)
+            
+        elif event_type == 'TEXT_MESSAGE_END':
+            self._finalize_assistant_message(current_message, message_id)
+            
+        elif event_type == 'TOOL_CALL_START':
+            self._handle_tool_call_start(event_data)
+            
+        elif event_type == 'TOOL_CALL_ARGS':
+            self._handle_tool_call_args(event_data)
+            
+        elif event_type == 'TOOL_CALL_END':
+            self._handle_tool_call_end(event_data)
+            
+        elif event_type == 'STATE_DELTA':
+            self._handle_state_delta(event_data)
+            
+        elif event_type == 'STATE_SNAPSHOT':
+            self._handle_state_snapshot(event_data)
+            
+        elif event_type == 'RUN_FINISHED':
+            print("✅ Agent finished processing\n")
+            return True
+            
+        return False
+    
+    def _finalize_assistant_message(self, current_message: str, message_id: str) -> None:
+        """Add completed assistant message to history"""
+        print()  # New line after message
+        
+        assistant_message = {
+            "id": message_id,
+            "role": "assistant", 
+            "content": current_message
+        }
+        self.messages.append(assistant_message)
+    
+    def _handle_tool_call_start(self, event_data: Dict[str, Any]) -> None:
+        """Handle tool call start event"""
+        tool_name = event_data.get('toolCallName', 'unknown')
+        tool_call_id = event_data.get('toolCallId')
+        print(f"🔧 Starting tool call: {tool_name} (ID: {tool_call_id})")
+    
+    def _handle_tool_call_args(self, event_data: Dict[str, Any]) -> None:
+        """Handle tool call arguments event"""
+        tool_call_id = event_data.get('toolCallId')
+        args = event_data.get('delta', '{}')
         
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{self.server_url}/agent",
-                    json=payload,
-                    headers={
-                        "Accept": "text/event-stream",
-                        "Cache-Control": "no-cache"
-                    }
-                ) as response:
-                    
-                    if response.status != 200:
-                        print(f"❌ Error: Server returned status {response.status}")
-                        return
-                    
-                    current_message = ""
-                    message_id = None
-                    
-                    # Process the Server-Sent Events stream
-                    async for line in response.content:
-                        line_str = line.decode('utf-8').strip()
-                        
-                        # Skip empty lines and comments
-                        if not line_str or line_str.startswith(':'):
-                            continue
-                            
-                        # Parse SSE format: "data: {json}" or "data: data: {json}"
-                        if line_str.startswith('data: '):
-                            try:
-                                # Remove the first "data: " prefix
-                                json_part = line_str[6:]
-                                
-                                # Check if there's another "data: " prefix and remove it
-                                if json_part.startswith('data: '):
-                                    json_part = json_part[6:]
-                                
-                                event_data = json.loads(json_part)
-                                event_type = event_data.get('type')
-                                
-                                if event_type == 'RUN_STARTED':
-                                    print("🔄 Agent started processing...")
-                                    
-                                elif event_type == 'TEXT_MESSAGE_START':
-                                    message_id = event_data.get('messageId')
-                                    print("💬 Assistant: ", end='', flush=True)
-                                    
-                                elif event_type == 'TEXT_MESSAGE_CONTENT':
-                                    delta = event_data.get('delta', '')
-                                    current_message += delta
-                                    print(delta, end='', flush=True)
-                                    
-                                elif event_type == 'TEXT_MESSAGE_END':
-                                    print()  # New line after message
-                                    
-                                    # Add assistant message to history
-                                    assistant_message = {
-                                        "id": message_id,
-                                        "role": "assistant", 
-                                        "content": current_message
-                                    }
-                                    self.messages.append(assistant_message)
-                                    current_message = ""
-                                    
-                                elif event_type == 'TOOL_CALL_START':
-                                    tool_name = event_data.get('toolCallName', 'unknown')
-                                    tool_call_id = event_data.get('toolCallId')
-                                    print(f"🔧 Starting tool call: {tool_name} (ID: {tool_call_id})")
-                                    
-                                elif event_type == 'TOOL_CALL_ARGS':
-                                    tool_call_id = event_data.get('toolCallId')
-                                    args = event_data.get('delta', '{}')
-                                    try:
-                                        parsed_args = json.loads(args)
-                                        print(f"📋 Tool arguments: {parsed_args}")
-                                    except json.JSONDecodeError:
-                                        print(f"📋 Tool arguments: {args}")
-                                    
-                                elif event_type == 'TOOL_CALL_END':
-                                    tool_call_id = event_data.get('toolCallId')
-                                    print(f"✅ Tool call completed (ID: {tool_call_id})")
-                                    
-                                elif event_type == 'STATE_DELTA':
-                                    delta = event_data.get('delta', {})
-                                    print(f"📊 State updated: {delta}")
-                                    # Validate/filter delta before applying
-                                    validated_delta = {
-                                        k: v for k, v in delta.items()
-                                        if self.is_valid_state_key(k, v)
-                                    }
-                                    if validated_delta:
-                                        self.state.update(validated_delta)
-                                    else:
-                                        print("⚠️ No valid state updates found in delta")
-                                    
-                                elif event_type == 'STATE_SNAPSHOT':
-                                    new_state = event_data.get('snapshot', {})
-                                    print(f"📸 State snapshot: {new_state}")
-                                    # Replace entire state
-                                    self.state = new_state
-                                    
-                                elif event_type == 'RUN_FINISHED':
-                                    print("✅ Agent finished processing\n")
-                                    break
-                                    
-                            except json.JSONDecodeError as e:
-                                print(f"⚠️ Failed to parse event: {line_str}")
-                                continue
-                            except Exception as e:
-                                print(f"⚠️ Error processing event: {e}")
-                                continue
-
-        except aiohttp.ClientError as e:
-            print(f"❌ Connection error: {e}")
-        except Exception as e:
-            print(f"❌ Unexpected error: {e}")
+            parsed_args = json.loads(args)
+            print(f"📋 Tool arguments: {parsed_args}")
+        except json.JSONDecodeError:
+            print(f"📋 Tool arguments: {args}")
+    
+    def _handle_tool_call_end(self, event_data: Dict[str, Any]) -> None:
+        """Handle tool call end event"""
+        tool_call_id = event_data.get('toolCallId')
+        print(f"✅ Tool call completed (ID: {tool_call_id})")
+    
+    def _handle_state_delta(self, event_data: Dict[str, Any]) -> None:
+        """Handle state delta update event"""
+        delta = event_data.get('delta', {})
+        print(f"📊 State updated: {delta}")
+        
+        # Validate/filter delta before applying
+        if validated_delta := {
+            k: v for k, v in delta.items()
+            if self.is_valid_state_key(k, v)
+        }:
+            self.state.update(validated_delta)
+        else:
+            print("⚠️ No valid state updates found in delta")
+    
+    def _handle_state_snapshot(self, event_data: Dict[str, Any]) -> None:
+        """Handle state snapshot event"""
+        new_state = event_data.get('snapshot', {})
+        print(f"📸 State snapshot: {new_state}")
+        self.state = new_state
     
     async def switch_agent(self, agent_type: str) -> bool:
         """Switch to a different agent"""
@@ -190,10 +234,7 @@ class AGUIClient:
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(f"{self.server_url}/agents") as response:
-                    if response.status == 200:
-                        return await response.json()
-                    else:
-                        return {}
+                    return await response.json() if response.status == 200 else {}
         except Exception as e:
             print(f"⚠️ Could not fetch agents: {e}")
             return {}
