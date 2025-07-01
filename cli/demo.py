@@ -5,7 +5,7 @@ Demonstrates all three agent types: Echo, Tool, and State agents
 """
 
 import asyncio
-from client import AGUIClient
+from cli.client import AGUIClient
 
 async def demo_echo_agent(client):
     """Demonstrate echo agent functionality"""
